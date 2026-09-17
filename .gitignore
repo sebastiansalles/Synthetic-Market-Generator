@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+build/
+dist/
+
+# Raw market data is re-downloadable; validated Parquet in data/processed/ IS committed
+data/raw/

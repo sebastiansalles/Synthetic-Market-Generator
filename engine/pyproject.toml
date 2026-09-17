@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synthetic-market-generator"
+version = "0.1.0"
+description = "Empirically calibrated synthetic market data engine"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "pyarrow",
+    "hmmlearn",
+    "arch",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "matplotlib", "jupyter", "yfinance"]
+
+[tool.setuptools.packages.find]
+include = ["synthetic*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
