@@ -179,3 +179,185 @@ def test_implied_kurtosis_analytic_values():
         0.0, 5, {}, True,
     )
     assert implied_excess_kurtosis(no_jumps) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Regime detection (HMM) and the AssetProfile contract
+# ---------------------------------------------------------------------------
+
+from synthetic.calibration import (  # noqa: E402
+    calibrate,
+    fit_hmm_regimes,
+    profile_gate_check,
+    simulate_profile_daily,
+    simulate_regimes,
+)
+
+
+def _simulate_markov_normal(rng, n, transition, means, vols):
+    states = np.empty(n, dtype=int)
+    states[0] = 0
+    for t in range(1, n):
+        states[t] = rng.choice(len(means), p=transition[states[t - 1]])
+    r = means[states] + vols[states] * rng.standard_normal(n)
+    return r, states
+
+
+def test_hmm_recovers_regimes_and_decodes_path():
+    rng = np.random.default_rng(3)
+    transition = np.array([[0.98, 0.02], [0.05, 0.95]])
+    means = np.array([0.0003, -0.0008])
+    vols = np.array([0.004, 0.012])
+    r_np, true_states = _simulate_markov_normal(rng, 4000, transition, means, vols)
+    r = pd.Series(r_np, index=pd.date_range("2020-01-01", periods=len(r_np), freq="B"))
+
+    hmm = fit_hmm_regimes(r, n_states=2, n_init=4, seed=0)
+
+    assert hmm.converged
+    assert list(np.argsort(hmm.state_var)) == [0, 1]  # canonical calm-first order
+    assert 0.003 < hmm.state_vol[0] < 0.005
+    assert 0.010 < hmm.state_vol[1] < 0.014
+    assert abs(hmm.transition[0, 0] - 0.98) < 0.02
+    assert abs(hmm.transition[1, 1] - 0.95) < 0.03
+    assert abs(hmm.expected_dwell[0] - 50) < 15  # dwell estimates are noisy: ~80 observed episodes
+    accuracy = (hmm.state_path(r) == true_states).mean()
+    assert accuracy > 0.9  # vol separation 3x -> near-clean decoding
+
+
+def test_simulate_regimes_respects_dwell_times():
+    rng = np.random.default_rng(4)
+    transition = np.array([[0.95, 0.05], [0.08, 0.92]])
+    r_np, _ = _simulate_markov_normal(rng, 3000, transition,
+                                      np.array([0.0, 0.0]), np.array([0.004, 0.015]))
+    hmm = fit_hmm_regimes(pd.Series(r_np), n_states=2, n_init=3, seed=1)
+
+    path = simulate_regimes(hmm, 50000, rng)
+    assert set(np.unique(path)) <= set(range(hmm.n_states))
+
+    sim_switch = (np.diff(path) != 0).mean()
+    # theoretical stationary switch rate: sum_i pi_i * (1 - P_ii)
+    pi1 = hmm.transition[0, 1] / (hmm.transition[0, 1] + hmm.transition[1, 0])
+    pi = np.array([1 - pi1, pi1])
+    theory_switch = float((pi * (1 - np.diag(hmm.transition))).sum())
+    assert abs(sim_switch - theory_switch) < 0.1 * theory_switch
+
+
+def test_simulate_profile_daily_reproduces_state_volatility():
+    rng = np.random.default_rng(5)
+    transition = np.array([[0.97, 0.03], [0.06, 0.94]])
+    r_np, _ = _simulate_markov_normal(rng, 3000, transition,
+                                      np.array([0.0, 0.0]), np.array([0.005, 0.012]))
+    close = 100 * np.exp(np.cumsum(r_np))
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2021-01-01", periods=len(r_np), freq="B"),
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "volume": np.zeros(len(r_np)),
+        }
+    )
+
+    profile = calibrate(df, asset="synthetic", n_states=2, seed=0)
+    sim = simulate_profile_daily(profile, 40000, np.random.default_rng(6))
+
+    assert profile.hmm.n_states == 2
+    # innovations of a pure Gaussian mixture should be near-Gaussian per state —
+    # guards against double-counting tail fatness in the composition
+    assert profile.state_innov_df.min() > 6
+    assert set(profile_gate_check(profile, n_sims=50, seed=2)["verdict"]) == {"PASS"}
+    # simulated unconditional vol within 20% of the calibrated target
+    assert abs(sim.std() - profile.targets["vol"]) < 0.2 * profile.targets["vol"]
+
+
+# ---------------------------------------------------------------------------
+# Hardening: holdout validation, per-state GARCH, conditional simulation
+# ---------------------------------------------------------------------------
+
+from synthetic.calibration import (  # noqa: E402
+    fit_state_garch,
+    garch_unconditional_var,
+    holdout_check,
+    simulate_garch_t,
+    simulate_profile_conditional,
+    time_split,
+)
+
+
+def test_time_split_partitions_at_boundary():
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=10, freq="D"),
+            "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 0.0,
+        }
+    )
+    train, test = time_split(df, "2020-01-05")
+
+    assert len(train) == 5 and len(test) == 5
+    assert (train["timestamp"] <= pd.Timestamp("2020-01-05")).all()
+    assert (test["timestamp"] > pd.Timestamp("2020-01-05")).all()
+
+
+def test_holdout_check_judges_against_test_targets():
+    rng = np.random.default_rng(7)
+    transition = np.array([[0.97, 0.03], [0.06, 0.94]])
+    r_np, _ = _simulate_markov_normal(rng, 3000, transition,
+                                      np.array([0.0, 0.0]), np.array([0.005, 0.012]))
+    close = 100 * np.exp(np.cumsum(r_np))
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2021-01-01", periods=3000, freq="B"),
+            "open": close, "high": close, "low": close, "close": close, "volume": 0.0,
+        }
+    )
+    split_date = str(df["timestamp"].iloc[2000].date())  # ~2/3 train, ~1/3 test
+    train, test = time_split(df, split_date)
+    profile = calibrate(train, asset="synthetic", n_states=2, seed=0)
+
+    table, targets = holdout_check(profile, test, n_sims=30, seed=3)
+
+    assert set(table["stat"]) == {"mean", "vol", "kurt"}
+    assert np.isclose(table.loc[table.stat == "vol", "target"].iloc[0], round(targets["vol"], 4))
+    # same distribution both halves -> vol verdict should pass out-of-sample
+    assert table.loc[table.stat == "vol", "verdict"].iloc[0] == "PASS"
+
+
+def test_per_state_garch_and_conditional_simulation():
+    rng = np.random.default_rng(8)
+    transition = np.array([[0.97, 0.03], [0.06, 0.94]])
+    r_np, _ = _simulate_markov_normal(rng, 3000, transition,
+                                      np.array([0.0, 0.0]), np.array([0.005, 0.012]))
+    close = 100 * np.exp(np.cumsum(r_np))
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2021-01-01", periods=3000, freq="B"),
+            "open": close, "high": close, "low": close, "close": close, "volume": 0.0,
+        }
+    )
+    profile = calibrate(df, asset="synthetic", n_states=2, seed=0)
+
+    assert len(profile.state_garch) == 2
+    for g in profile.state_garch:
+        assert {"mu", "omega", "alpha", "beta", "nu", "n_days"} <= set(g)
+
+    # a single-state GARCH-t sim must hover near its theoretical unconditional vol
+    g0 = profile.state_garch[0]
+    sim = simulate_garch_t(g0, 40000, np.random.default_rng(9))
+    theory = np.sqrt(garch_unconditional_var(g0))
+    assert abs(sim.std() - theory) < 0.1 * theory
+
+    # the conditional (regime + per-state GARCH) sim must track the marginal vol
+    full = simulate_profile_conditional(profile, 40000, np.random.default_rng(10))
+    assert abs(full.std() - profile.targets["vol"]) < 0.2 * profile.targets["vol"]
+
+
+def test_sim_safe_garch_tames_igarch_params():
+    explosive = {"mu": 0.0, "omega": 1e-6, "alpha": 0.05, "beta": 0.96,
+                 "persistence": 1.01, "nu": 8.0, "uncond_var": 4e-4}
+
+    sim = simulate_garch_t(explosive, 30000, np.random.default_rng(11))
+
+    # level anchored at the sample variance, not blown up by omega/(1-a-b)
+    assert abs(sim.std() - 0.02) < 0.2 * 0.02
+    assert np.isfinite(sim).all()

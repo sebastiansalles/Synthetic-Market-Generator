@@ -15,6 +15,7 @@ Large moves that do NOT revert (e.g. a genuine crash) are kept and reported.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -200,7 +201,12 @@ def mle_gbm(r: pd.Series, periods_per_year: int = 252) -> FitResult:
 
 
 def mle_student_t(r: pd.Series, periods_per_year: int = 252, n_starts: int = 8) -> FitResult:
-    """MLE for i.i.d. Student-t log returns (loc/scale/df)."""
+    """MLE for i.i.d. Student-t log returns (loc/scale/df).
+
+    Scale bounds are wide on purpose: this estimator also fits *standardized*
+    residuals (scale ~ 1), where log(scale) ≈ 0 — infeasible starts make
+    L-BFGS-B clamp to a bound and return garbage. df is bounded below at >2 so
+    the variance stays defined."""
     from scipy.optimize import minimize
     from scipy.stats import t as student_t
 
@@ -211,7 +217,7 @@ def mle_student_t(r: pd.Series, periods_per_year: int = 252, n_starts: int = 8) 
         df, loc, scale = np.exp(theta[0]), theta[1], np.exp(theta[2])
         return -student_t.logpdf(x, df, loc, scale).sum()
 
-    bounds = [(-2.0, 5.0), (-0.05, 0.05), (-8.0, -2.0)]
+    bounds = [(np.log(2.05), 5.0), (-0.5, 0.5), (-10.0, 2.0)]
     best = None
     for df0 in np.geomspace(3.0, 40.0, n_starts):
         scale0 = x.std(ddof=1) * np.sqrt((df0 - 2) / df0)
@@ -296,3 +302,321 @@ def implied_excess_kurtosis(fit: FitResult, periods_per_year: int = 252) -> floa
         k4 = lam_dt * (p["mu_j"] ** 4 + 6 * p["mu_j"] ** 2 * p["sigma_j"] ** 2 + 3 * p["sigma_j"] ** 4)
         return k4 / k2**2
     raise ValueError(f"unknown model: {fit.model}")
+
+
+# ---------------------------------------------------------------------------
+# Regime detection (Hidden Markov Model) and the AssetProfile contract
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HMMRegimes:
+    """2+ state Gaussian HMM on log returns; states canonically ordered calm -> turbulent."""
+
+    n_states: int
+    transition: np.ndarray
+    start_probs: np.ndarray
+    state_mean: np.ndarray  # per-bar mean log return
+    state_var: np.ndarray  # per-bar variance
+    expected_dwell: np.ndarray  # days
+    loglik: float
+    converged: bool
+    model: object = None  # fitted hmmlearn object (kept for decoding); not in repr
+
+    @property
+    def state_vol(self) -> np.ndarray:
+        return np.sqrt(self.state_var)
+
+    def state_vol_ann(self, periods_per_year: int = 252) -> np.ndarray:
+        return self.state_vol * np.sqrt(periods_per_year)
+
+    def state_path(self, r: pd.Series) -> np.ndarray:
+        """Viterbi path, canonically ordered (0 = calmest state)."""
+        raw = self.model.predict(np.asarray(r, dtype=float).reshape(-1, 1))
+        order = np.argsort(self._fit_variances())
+        remap = np.empty_like(order)
+        remap[order] = np.arange(self.n_states)
+        return remap[raw]
+
+    def posterior(self, r: pd.Series) -> np.ndarray:
+        """Smoothed state probabilities, columns ordered calm -> turbulent."""
+        order = np.argsort(self._fit_variances())
+        return self.model.predict_proba(np.asarray(r, dtype=float).reshape(-1, 1))[:, order]
+
+    def _fit_variances(self) -> np.ndarray:
+        return np.asarray(self.model.covars_).ravel()
+
+
+def fit_hmm_regimes(r: pd.Series, n_states: int = 2, n_init: int = 10, seed: int = 0) -> HMMRegimes:
+    """Fit a Gaussian HMM on log returns; states sorted by variance (calm first).
+
+    hmmlearn has no built-in multi-start in this version, so restarts are done
+    here, keeping the best model by log-likelihood.
+    """
+    from hmmlearn.hmm import GaussianHMM
+
+    logging.getLogger("hmmlearn").setLevel(logging.ERROR)  # silence restart chatter
+    x = np.asarray(r, dtype=float).reshape(-1, 1)
+    best = None
+    for i in range(n_init):
+        model = GaussianHMM(n_components=n_states, covariance_type="diag",
+                            random_state=seed + i).fit(x)
+        if best is None or model.score(x) > best.score(x):
+            best = model
+    model = best
+    order = np.argsort(model.covars_.ravel())
+    transition = model.transmat_[order][:, order]
+    start = model.startprob_[order]
+    means = model.means_.ravel()[order]
+    variances = model.covars_.ravel()[order]
+    return HMMRegimes(
+        n_states=n_states,
+        transition=transition,
+        start_probs=start,
+        state_mean=means,
+        state_var=variances,
+        expected_dwell=1.0 / (1.0 - np.diag(transition)),
+        loglik=model.score(x),
+        converged=bool(model.monitor_.converged),
+        model=model,
+    )
+
+
+def simulate_regimes(regimes: HMMRegimes, n: int, rng) -> np.ndarray:
+    """Sample a state path of length n from the fitted Markov chain."""
+    states = np.empty(n, dtype=int)
+    states[0] = rng.choice(regimes.n_states, p=regimes.start_probs)
+    cumulative = np.cumsum(regimes.transition, axis=1)
+    draws = rng.random(n)
+    for t in range(1, n):
+        states[t] = np.searchsorted(cumulative[states[t - 1]], draws[t])
+    return states
+
+
+def fit_garch_t(r: pd.Series, periods_per_year: int = 252) -> dict:
+    """GARCH(1,1) with Student-t innovations via `arch`; params in per-bar decimal units."""
+    from arch import arch_model
+
+    res = arch_model(np.asarray(r, dtype=float), vol="GARCH", p=1, q=1, dist="t",
+                     rescale=True).fit(disp="off")
+    p, se = res.params, res.std_err
+    s = res.scale  # rescale=True optimizes internally scaled data; convert back
+    return {
+        "mu": p["mu"] / s,
+        "omega": p["omega"] / s**2,
+        "alpha": p["alpha[1]"],
+        "beta": p["beta[1]"],
+        "persistence": p["alpha[1]"] + p["beta[1]"],
+        "nu": p["nu"],
+        "se_nu": se["nu"],
+        "uncond_var": float(np.asarray(r, dtype=float).var()),  # level anchor for near-unit-root fits
+    }
+
+
+def garch_unconditional_var(g: dict) -> float:
+    """Unconditional variance: analytic when covariance-stationary, sample variance
+    when persistence >= 0.999 (IGARCH territory — omega/(1-a-b) would explode)."""
+    if g["persistence"] < 0.999:
+        return g["omega"] / (1.0 - g["alpha"] - g["beta"])
+    return g["uncond_var"]
+
+
+@dataclass
+class AssetProfile:
+    """The Phase 1 output contract: everything the Phase 2 simulator consumes."""
+
+    asset: str
+    periods_per_year: int
+    n_bars: int
+    targets: dict  # mean / vol / kurt of clean per-bar log returns
+    gbm: FitResult
+    student_t: FitResult
+    merton_jd: FitResult  # exploratory: daily JD is not identified (see notebook §7)
+    garch: dict
+    state_garch: list  # per-state GARCH(1,1)-t dicts (Viterbi-assigned days)
+    hmm: HMMRegimes
+    state_innov_df: np.ndarray  # per-state Student-t df on state-standardized residuals
+    scrub: ScrubReport
+
+
+def fit_state_innovation_df(r: pd.Series, hmm: HMMRegimes, min_days: int = 30) -> np.ndarray:
+    """Per-state Student-t df on state-standardized residuals: within-regime fatness
+    with the regime mixture's contribution to the marginal kurtosis removed.
+    inf => Gaussian innovations (small or near-normal state)."""
+    path = hmm.state_path(r)
+    z = np.asarray(r, dtype=float)
+    dfs = np.full(hmm.n_states, np.inf)
+    for s in range(hmm.n_states):
+        mask = path == s
+        if mask.sum() < min_days:
+            continue
+        zs = (z[mask] - hmm.state_mean[s]) / hmm.state_vol[s]
+        df = mle_student_t(pd.Series(zs)).params["df"]
+        dfs[s] = df if df >= 2.5 else np.inf
+    return dfs
+
+
+def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int = 252,
+              n_states: int = 2, seed: int = 0) -> AssetProfile:
+    """Full Phase 1 pipeline: OHLCV frame -> scrubbed returns -> fitted AssetProfile."""
+    r = log_returns(df)
+    clean, report = scrub_returns(r)
+    hmm = fit_hmm_regimes(clean, n_states=n_states, seed=seed)
+    return AssetProfile(
+        asset=asset,
+        periods_per_year=periods_per_year,
+        n_bars=len(clean),
+        targets={"mean": clean.mean(), "vol": clean.std(), "kurt": clean.kurt()},
+        gbm=mle_gbm(clean, periods_per_year),
+        student_t=mle_student_t(clean, periods_per_year),
+        merton_jd=mle_merton_jd(clean, periods_per_year),
+        garch=fit_garch_t(clean, periods_per_year),
+        state_garch=fit_state_garch(clean, hmm, periods_per_year),
+        hmm=hmm,
+        state_innov_df=fit_state_innovation_df(clean, hmm),
+        scrub=report,
+    )
+
+
+def simulate_profile_daily(profile: AssetProfile, n: int, rng) -> np.ndarray:
+    """Daily log returns from the profile's MARGINAL model: regime path + per-state
+    unit-variance Student-t innovations scaled by per-state volatility. Used for the
+    Phase 1 gate; for the conditional (per-state GARCH) model see
+    `simulate_profile_conditional`.
+
+    Unit-variance t via normal/chi-square: t = z * sqrt((df-2)/chi2_df)."""
+    states = simulate_regimes(profile.hmm, n, rng)
+    df = profile.state_innov_df[states]
+    df_safe = np.where(np.isinf(df), 3.0, df)  # placeholder for Gaussian states
+    z = rng.standard_normal(n)
+    chi2 = rng.chisquare(df_safe, n)
+    t_unit = np.where(np.isinf(df), z, z * np.sqrt((df_safe - 2) / chi2))
+    return profile.hmm.state_mean[states] + profile.hmm.state_vol[states] * t_unit
+
+
+def profile_gate_check(profile: AssetProfile, n_sims: int = 500, seed: int = 1,
+                       targets: dict | None = None, n: int | None = None) -> pd.DataFrame:
+    """Phase 1 gate: does simulating from the profile reproduce mean/vol/kurtosis
+    within model-implied (parametric-bootstrap) tolerance? Pass `targets` to judge
+    against out-of-sample statistics instead of the in-sample ones."""
+    from scipy.stats import kurtosis as stats_kurtosis
+
+    n = n or profile.n_bars
+    rng = np.random.default_rng(seed)
+    sims = np.array([simulate_profile_daily(profile, n, rng) for _ in range(n_sims)])
+    stats = {
+        "mean": sims.mean(axis=1),
+        "vol": sims.std(axis=1),
+        "kurt": stats_kurtosis(sims, axis=1, bias=False),
+    }
+    rows = []
+    for name, target in (targets or profile.targets).items():
+        s = stats[name]
+        lo, hi = np.percentile(s, [5, 95])
+        pct = float((s < target).mean())
+        if name == "mean":
+            tol_pp = 2.0 / profile.periods_per_year  # drift is unidentified: ±2pp/yr acceptance
+            verdict = "PASS" if (lo <= target <= hi or abs(s.mean() - target) < tol_pp) else "MARGINAL"
+        else:
+            verdict = "PASS" if lo <= target <= hi else ("MARGINAL" if 0.01 < pct < 0.99 else "FAIL")
+        rows.append({"stat": name, "target": round(target, 4), "sim_mean": round(s.mean(), 4),
+                     "sim 5-95%": f"[{lo:.4f}, {hi:.4f}]", "pct_of_target": pct, "verdict": verdict})
+    return pd.DataFrame(rows)
+
+
+def time_split(df: pd.DataFrame, split_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split an OHLCV frame into (train, test) at a date boundary."""
+    cut = pd.Timestamp(split_date)
+    train = df[df["timestamp"] <= cut].reset_index(drop=True)
+    test = df[df["timestamp"] > cut].reset_index(drop=True)
+    return train, test
+
+
+def holdout_check(profile: AssetProfile, df_test: pd.DataFrame,
+                  n_sims: int = 500, seed: int = 11) -> tuple[pd.DataFrame, dict]:
+    """Out-of-sample gate: judge the (train-fitted) profile against statistics of
+    the test window. Returns (gate table, test targets)."""
+    r_test, _ = scrub_returns(log_returns(df_test))
+    targets = {"mean": r_test.mean(), "vol": r_test.std(), "kurt": r_test.kurt()}
+    table = profile_gate_check(profile, n_sims=n_sims, seed=seed, targets=targets, n=len(r_test))
+    return table, targets
+
+
+def fit_state_garch(r: pd.Series, hmm: HMMRegimes,
+                    periods_per_year: int = 252) -> list[dict]:
+    """GARCH(1,1)-t fitted within each HMM state (days assigned by Viterbi path).
+
+    Approximation: state subsets are non-contiguous, so vol persistence across
+    state switches is not modeled — a joint Markov-switching GARCH MLE is the
+    strict alternative. Documented in the notebook."""
+    path = hmm.state_path(r)
+    x = np.asarray(r, dtype=float)
+    out = []
+    for s in range(hmm.n_states):
+        xs = x[path == s]
+        fit = fit_garch_t(pd.Series(xs), periods_per_year)
+        fit["n_days"] = int(len(xs))
+        out.append(fit)
+    return out
+
+
+def simulate_garch_t(params: dict, n: int, rng) -> np.ndarray:
+    """GARCH(1,1)-t return path started from the unconditional variance."""
+    from scipy.stats import t as student_t
+
+    params = _sim_safe_garch(params)
+    uncond = garch_unconditional_var(params)
+    z = student_t.rvs(params["nu"], size=n, random_state=rng)
+    z = z / np.sqrt(params["nu"] / (params["nu"] - 2))  # unit variance
+    h = np.empty(n)
+    eps = np.empty(n)
+    h[0] = uncond
+    eps[0] = np.sqrt(h[0]) * z[0]
+    for t in range(1, n):
+        h[t] = params["omega"] + params["alpha"] * eps[t - 1] ** 2 + params["beta"] * h[t - 1]
+        eps[t] = np.sqrt(h[t]) * z[t]
+    return params["mu"] + eps
+
+
+def simulate_profile_conditional(profile: AssetProfile, n: int, rng) -> np.ndarray:
+    """Regime-switching GARCH(1,1)-t: Markov regime path, per-state GARCH recursion.
+    Conditional variance re-initializes at the new state's unconditional level on
+    every regime switch. This is the Phase 2 simulator's daily core."""
+    states = simulate_regimes(profile.hmm, n, rng)
+    g = [_sim_safe_garch(x) for x in profile.state_garch]
+    mu = np.array([x["mu"] for x in g])[states]
+    omega = np.array([x["omega"] for x in g])[states]
+    alpha = np.array([x["alpha"] for x in g])[states]
+    beta = np.array([x["beta"] for x in g])[states]
+    nu = np.array([x["nu"] for x in g])[states]
+    uncond = np.array([garch_unconditional_var(x) for x in g])[states]
+
+    z = rng.standard_t(nu, n) / np.sqrt(nu / (nu - 2))  # unit-variance t, per-state df
+    r = np.empty(n)
+    h = uncond[0]
+    prev = states[0]
+    for t in range(n):
+        if states[t] != prev:
+            h = uncond[t]
+            prev = states[t]
+        eps = np.sqrt(h) * z[t]
+        r[t] = mu[t] + eps
+        h = omega[t] + alpha[t] * eps**2 + beta[t] * h
+    return r
+
+
+def hmm_bic(loglik: float, n: int, n_states: int) -> float:
+    """BIC for a diag-covariance Gaussian HMM: k = transitions + start + means + covars."""
+    k = n_states**2 + 2 * n_states - 1
+    return -2.0 * loglik + k * np.log(n)
+
+
+def _sim_safe_garch(g: dict) -> dict:
+    """Clamp GARCH persistence to <=0.999 for simulation, rescaling omega so the
+    unconditional level is preserved (stationary approximation of an IGARCH fit)."""
+    a, b = min(g["alpha"], 0.5), g["beta"]
+    if a + b <= 0.999:
+        return g
+    level = garch_unconditional_var(g)
+    b2 = 0.999 - a
+    return {**g, "alpha": a, "beta": b2, "omega": level * (1.0 - a - b2)}

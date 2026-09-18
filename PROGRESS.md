@@ -85,3 +85,37 @@ Cross-session memory: what's done, decisions made, current state. Append a dated
 **Next**
 - User: commit (everything still uncommitted)
 - HMM regime detection (2-state Gaussian, hmmlearn) → then `calibrate(asset) -> AssetProfile` graduates to engine → Phase 2 simulator
+
+## Session 5 — 2026-09-17 — HMM regimes + Phase 1 gate (PHASE 1 COMPLETE)
+
+**Done**
+- Engine: `HMMRegimes` (canonical calm→turbulent ordering, Viterbi `state_path`, smoothed `posterior`), `fit_hmm_regimes` (manual multi-start; hmmlearn 0.3.3 has no `n_init`), `simulate_regimes`, `fit_garch_t` wrapper (arch, decimal units), `AssetProfile` dataclass, `calibrate(df) -> AssetProfile`, `fit_state_innovation_df` (per-state t df on standardized residuals — avoids double-counting tail fatness), `simulate_profile_daily`, `profile_gate_check` (parametric-bootstrap gate). 30 tests passing (Markov-chain recovery, dwell-time theory check, end-to-end calibrate on synthetic OHLCV).
+- Bug found & fixed: `mle_student_t` scale bounds assumed return-scale data; standardized residuals (scale≈1) started infeasible → L-BFGS-B clamped to bound, garbage fits. Bounds widened (scale log ∈ [-10, 2], df > 2.05).
+- Notebook section 8 + Phase-1-complete verdict; executed headlessly, 0 errors, md synced to executed output.
+
+**Results**
+- Regimes: EUR/USD calm 7.5%/turbulent 15.3% ann vol, dwell 104d/24d, turbulent mean −1.8bp/day; gold 13.3%/29.9%, dwell 59d/17d, −6.3bp/day. Turbulence maps to real history: EUR 2008-11 + 2015 (euro crisis/SNB), gold 2008/2013/2020/2026 (99% capture of Jan-2026 crash).
+- Per-state innovation df: EUR 8.4/13.2, gold 6.8/5.8.
+- **Phase 1 gate: 6/6 PASS** (mean/vol/kurt × 2 assets, bootstrap tolerances).
+- Documented gap: profile under-generates r² ACF at mid/long lags (above 95th pct at lags 2/5/10 EUR, 2/10 gold) → slow clustering component lives inside states → quantitative motivation for Phase 2 per-state GARCH(1,1).
+
+**Next**
+- Commit; Phase 2: regime-switching GARCH(1,1)-t simulator with per-state params, intra-candle ticks → bars, statistical validation suite vs the targets frozen in AssetProfile
+
+## Session 6 — 2026-09-18 — Phase 1 hardening pass (user-requested full scope)
+
+**Done**
+- Engine: `time_split`, `holdout_check`, `profile_gate_check(targets=, n=)` (out-of-sample judging), `fit_state_garch`, `simulate_garch_t`, `simulate_profile_conditional` (regime path + per-state GARCH recursion — Phase 2 daily core), `garch_unconditional_var`, `_sim_safe_garch` (IGARCH guard), `hmm_bic`. `AssetProfile` gained `state_garch`. 34 tests passing incl. IGARCH-taming regression.
+- **Bug fixed:** `fit_garch_t` (arch, `rescale=True`) reported μ/ω in internally-scaled units (×100) — params now divided by `res.scale`. Was silently corrupting every GARCH-derived variance in profiles.
+- Notebook section 9 (holdout + era decomposition, conditional ACF recheck, scrub sensitivity, HMM bootstrap SEs + 2v3 BIC); executed headlessly, 0 errors; md synced.
+
+**Hardening findings (the honest record)**
+- Holdout 2003–14 → 2015–26: mean ✓ kurtosis ✓ both assets. Vol ✗ both — decomposed: state vol *levels* stable (gold turbulent test 2.25% vs train 2.07%), but test era realized turbulent shares at the 0th percentile of chain-implied bands (EUR 4.8% vs [10.3, 26.3]%; gold 8.7% vs [14.5, 24.9]%) — calm era draw; stationary model can't foresee regime mix → motivates Phase 2 scenario injection / initial-state control (already in brief).
+- ACF gap CLOSED by conditional model: 7/8 inside (EUR 4/4; gold misses lag-10 only).
+- Scrub rules are a plateau: vol 8.98–9.14% / 17.7–18.7%, df ±0.16, persistence ±0.0003 across z∈{8,12}, gap∈{4,8}.
+- HMM: levels precise (±5–8%); **persistence weakly identified** (dwell CIs very wide — report as indicative). BIC: EUR 2-state; **gold 3-state wins** — third state = 54% vol, 1-day-dwell crash state ≡ the jump layer daily JD couldn't identify. Parked per brief ("start with 2"); gold crash-state/jump-layer upgrade is stretch-phase work.
+
+**Phase 1 final status: hardened & accepted.** Limitations on record: era-dependence of mixture weight; HMM dwell uncertainty; gold long-lag residual; gold wants a crash state (parked).
+
+**Next**
+- Commit; Phase 2: `simulate(profile, n_candles, scenario?) → OHLCV[]` wrapping `simulate_profile_conditional`; intra-candle ticks → bars; full validation suite vs frozen targets.
