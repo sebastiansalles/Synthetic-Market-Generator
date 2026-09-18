@@ -48,3 +48,40 @@ Cross-session memory: what's done, decisions made, current state. Append a dated
 
 - Phase 1 exploration happens in `notebooks/01_calibration.ipynb` (jupyter from the venv); **lab → library rule**: gate-critical code graduates to `engine/synthetic/calibration.py` + pytest tests — the notebook uses the engine, never reimplements it
 - Notebook hygiene: Restart & Run All before done; seed all randomness; conclusions in markdown (doubles as Phase 1 report)
+
+## Session 3 — 2026-09-17 — Data hygiene + corrected Phase 1 targets
+
+**Done**
+- `engine/synthetic/calibration.py`: `log_returns`, `robust_z`, `scrub_returns` (corrupt-print pairs + gap returns dropped, un-reverted spikes kept & reported via `ScrubReport`), `gate_stats`, `acf_values` — 22 tests passing total
+- Notebook rebuilt on engine functions, executed headlessly (nbconvert), 0 errors; conclusions rewritten from clean numbers
+
+**Decisions**
+- Scrub rules: robust z (median/MAD) > 10 + next-day reversion ≥ 50% → drop corrupt pair (both returns); returns across ≥ 6-day holes dropped; flagged non-reverting spikes kept, adjudicated by hand
+- Hygiene is a calibration-time view; raw + processed untouched
+
+**Phase 1 calibration targets (daily, clean)**
+- EUR/USD: kurt 2.55, vol_ann 8.98%, ACF r² ≈ 0.144 lag1 decaying to 0.122 @ lag10; extremes ≤ 3.4%, no kept spikes
+- XAU/USD: kurt 6.82, vol_ann 18.1%, ACF r² 0.075–0.124; 3 kept real extremes (2008-11-25, 2013-04-15 −9.8% largest gold crash on record, 2026-01-30 −11.4%)
+- Ghosts removed: EUR/USD 5 corrupt pairs (all 2008) + 3 gap returns; gold 53 gap returns, 0 corrupt pairs
+
+**Next**
+- User: commit (Phase 0 + hygiene still uncommitted)
+- Phase 1 MLE: GBM baseline → Student-t → Merton jump-diffusion (gold first); model selection via log-lik/AIC vs kurtosis reproduction
+
+## Session 4 — 2026-09-17 — MLE baseline + fat tails + jumps (engine + notebook)
+
+**Done**
+- `engine/synthetic/calibration.py` gained: `FitResult` (params/loglik/AIC/SEs), `mle_gbm` (analytic), `mle_student_t`, `mle_merton_jd` (Poisson-mixture, multi-start L-BFGS-B), `_num_hessian` + `_se_from_hessian` (observed-information SEs), `implied_excess_kurtosis`. 27 tests passing incl. synthetic-data parameter recovery.
+- Notebook sections 4–7: fit comparison table, density overlays, **kurtosis gate via parametric bootstrap** (B=2000), GARCH(1,1)-t decomposition (`arch`). Executed headlessly, 0 errors; md synced to executed numbers.
+
+**Results (daily, clean)**
+- GBM decisively rejected (Δloglik vs t: EUR +248, gold +531). Student-t wins on AIC both assets: df 4.49±0.09 / 3.39±0.06.
+- Merton JD collapses to "many tiny jumps" (λ̂≈143–145/yr, tiny σ_J); se(σ) blows up ±0.0008→±0.197 (flat ridge). Daily data structurally cannot identify jumps — kept in engine for later hourly/tick work; jump behavior will come from HMM regimes + scenario injection.
+- GARCH(1,1)-t: EUR persistence 0.998, nu 8.05±0.81 (vs iid df 4.49 — clustering explains most marginal kurt); gold persistence 0.995, nu 4.35±0.25 (genuinely fat innovations). Kurtosis gate ✓ via decomposition + bootstrap.
+- Drift: gold +13.7–16.9%/yr ≈5σ (identified); EUR/USD μ unidentified (±~2pp — structural, se≈σ_ann/√T).
+
+**Data sufficiency verdict** — sufficient: σ (±0.5pp), tail index, persistence, gold drift. Insufficient (structural, not fixable with more daily data): EUR drift, daily jump intensity. Engine choice: GARCH(1,1) + Student-t innovations for both assets.
+
+**Next**
+- User: commit (everything still uncommitted)
+- HMM regime detection (2-state Gaussian, hmmlearn) → then `calibrate(asset) -> AssetProfile` graduates to engine → Phase 2 simulator
