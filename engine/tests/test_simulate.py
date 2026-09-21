@@ -103,3 +103,49 @@ def test_validation_suite_runs_end_to_end():
     assert {"mean", "vol", "kurt", "r2_acf_1", "max_abs"} <= set(suite["metric"])
     assert {"volu_mean", "volu_corr_absr", "volu_acf1"} <= set(suite["metric"])
     assert suite["sim 5-95%"].str.contains(r"\[", regex=True).all()
+
+
+# ---------------------------------------------------------------------------
+# Pre-Phase-3 consolidation: fat-tailed bridge, candle-shape metrics, persistence
+# ---------------------------------------------------------------------------
+
+from synthetic.profile_store import load_profile, save_profile
+
+
+def test_bridge_conserves_candle_return_with_fat_tailed_ticks():
+    profile = _profile_with_volume()
+    bars, ticks = simulate_ticks(profile, 100, seed=13, ticks_per_candle=24)
+
+    for bar_id in [0, 50, 99]:
+        seg = ticks[ticks.bar_id == bar_id]["price"].to_numpy()
+        o = bars["open"].iloc[bar_id]
+        bridge_ret = np.log(seg[-1] / o)  # open = previous close by construction
+        expected = np.log(bars["close"].iloc[bar_id] / o)
+        assert np.isclose(bridge_ret, expected, atol=1e-10)
+
+
+def test_suite_includes_candle_shape_and_turb_share():
+    profile = _profile_with_volume()
+    bars = simulate(profile, 400, seed=11)
+    suite = validation_suite(profile, bars, n_sims=10, seed=201)
+
+    metrics = set(suite["metric"])
+    assert {"range_mean", "body_ratio", "close_loc", "up_bar_share", "turb_share"} <= metrics
+    row = suite[suite.metric == "turb_share"].iloc[0]
+    assert np.isfinite(row["sim_median"])
+
+
+def test_profile_persistence_round_trip(tmp_path):
+    profile = _profile_with_volume()
+    path = save_profile(profile, tmp_path / "synthetic.pkl")
+    loaded = load_profile(path)
+
+    assert loaded.asset == profile.asset
+    assert loaded.periods_per_year == profile.periods_per_year
+    np.testing.assert_allclose(loaded.hmm.transition, profile.hmm.transition)
+    np.testing.assert_allclose(loaded.state_innov_df, profile.state_innov_df)
+    np.testing.assert_allclose(loaded.targets["vol"], profile.targets["vol"])
+    # a loaded profile simulates identically (hmm decode must survive the pickle)
+    a = simulate(profile, 200, seed=1)
+    b = simulate(loaded, 200, seed=1)
+    pd.testing.assert_frame_equal(a, b)

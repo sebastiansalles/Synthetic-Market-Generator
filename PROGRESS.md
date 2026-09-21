@@ -152,4 +152,18 @@ Cross-session memory: what's done, decisions made, current state. Append a dated
 
 **Phase 2 status: engine complete and gated.** Remaining per brief: LEAN export (Phase 5), tick-stream animation consumer (Phase 4; stream already emitted).
 
-**Next**: commit; Phase 3 (FastAPI serving profiles + simulation endpoints) or Phase 4 (canvas animation consuming `simulate_ticks`).
+## Session 8 — 2026-09-18 — Pre-Phase-3 consolidation (user-approved audit items 1–5)
+
+**Done**
+- Fat-tailed intrabar bridge: tick increments drawn from the same per-state Student-t family as the daily GARCH core (nu≤2.1 → Gaussian fallback); bridge conservation regression-tested (tick increments sum exactly to the candle return).
+- Candle-shape metrics in the validation suite: range_mean, body_ratio, close_loc, up_bar_share — the suite now validates every emitted byte, not just closes.
+- `turb_share` fix: was real-only (NaN on sims → silently dropped); now judged on the latent state path.
+- `profile_store.py`: versioned pickle save/load; profiles persisted to `data/profiles/{asset}.pkl` (eurusd/xauusd/btcusd); round-trip test incl. identical seeded simulation from the loaded profile.
+- Test hygiene: ~all 845 warnings were one benign hmmlearn/numpy-2.5 deprecation → filtered in pyproject; 43 tests, clean output.
+
+**New findings from the shape metrics (documented, deliberately NOT patched)**
+- Real candle bodies are tiny vs range: EUR/USD body/range 0.155 vs bridge 0.523 — intraday prices wander and revert around the close-to-close move. Real up-bar share 0.41–0.44 vs symmetric 0.50 (EUR 13σ — session/convention structure). Gold daily range tighter than fat-tailed ticks imply. Closing this = calibrated intrabar model (OU component, session drift) against the hourly layer — scoped with Phase 4 tick animation, not before.
+
+**Suite after consolidation (150 seeded sims)**: EUR 11/13 · XAU 10/16 · BTC 7/16 — all remaining CHECKs have names (intrabar microstructure, parked crash state, era effects, hairlines). The suite maps the frontier instead of rubber-stamping.
+
+**Next**: commit; Phase 3 (FastAPI serving persisted profiles + simulation endpoints) or Phase 4.

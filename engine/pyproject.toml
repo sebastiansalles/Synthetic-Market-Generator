@@ -24,3 +24,8 @@ include = ["synthetic*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # hmmlearn on numpy>=2.5: `arr.shape = ...` deprecation, triggered inside the
+    # dependency on every fit — benign, one category, ~all of the warning volume
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
+]

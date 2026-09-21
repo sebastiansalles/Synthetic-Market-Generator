@@ -71,12 +71,25 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
     returns, h = conditional_returns(profile, states, rng)
     volumes = simulate_volume(profile.volume, returns, states, profile.hmm.state_vol, rng)
     timestamps = _daily_timestamps(profile, n_candles)
+    # Intrabar increments use the SAME per-state Student-t innovation family as the
+    # daily GARCH core (nu <= 2.1 falls back to Gaussian) — Phase 1's central
+    # finding was fat-tailed innovations; Gaussian ticks would contradict it.
+    nu = np.array([g["nu"] for g in profile.state_garch])
+
+    def tick_increments(t: int) -> np.ndarray:
+        n = ticks_per_candle
+        if nu[states[t]] > 2.1:
+            z = rng.standard_t(nu[states[t]], n)
+            z = z / np.sqrt(nu[states[t]] / (nu[states[t]] - 2.0))  # unit variance
+        else:
+            z = rng.standard_normal(n)
+        return z * np.sqrt(h[t] / n)
 
     prev_close = start_price
     bar_rows = []
     tick_ids, tick_idx, tick_prices = [], [], []
     for t in range(n_candles):
-        e = rng.standard_normal(ticks_per_candle) * np.sqrt(h[t] / ticks_per_candle)
+        e = tick_increments(t)
         delta = returns[t] / ticks_per_candle + (e - e.mean())  # bridge: increments sum to r_t
         path = prev_close * np.exp(np.cumsum(delta))
         bar_rows.append(
@@ -127,6 +140,20 @@ def simulate(profile: AssetProfile, n_candles: int, scenario: Scenario | None = 
 # ---------------------------------------------------------------------------
 
 
+def _ohlc_shape_metrics(bars: pd.DataFrame) -> dict:
+    """Candle-internal structure: the suite validates not just closes but the
+    bars themselves (range, close location, body share)."""
+    o, h, l, c = (np.log(bars[k].to_numpy(dtype=float)) for k in ("open", "high", "low", "close"))
+    log_range = h - l
+    eps = 1e-12
+    return {
+        "range_mean": float(log_range.mean()),
+        "body_ratio": float(np.mean(np.abs(c - o) / (log_range + eps))),
+        "close_loc": float(np.mean((c - l) / (h - l + eps))),
+        "up_bar_share": float(np.mean(c > o)),
+    }
+
+
 def _real_metrics(profile: AssetProfile, df_real: pd.DataFrame) -> dict:
     from synthetic.registry import REGISTRY as REG
 
@@ -140,6 +167,7 @@ def _real_metrics(profile: AssetProfile, df_real: pd.DataFrame) -> dict:
     }
     for lag in (1, 2, 5, 10):
         out[f"r2_acf_{lag}"] = (r**2).autocorr(lag)
+    out.update(_ohlc_shape_metrics(df_real))
     v = pd.Series(df_real["volume"].to_numpy(dtype=float),
                   index=pd.DatetimeIndex(df_real["timestamp"])).iloc[1:].reindex(r.index)
     if profile.volume is not None and profile.volume.enabled and np.nanmax(v) > 0:
@@ -149,12 +177,13 @@ def _real_metrics(profile: AssetProfile, df_real: pd.DataFrame) -> dict:
     return out
 
 
-def _sim_metrics(bars: pd.DataFrame) -> dict:
+def _sim_metrics(bars: pd.DataFrame, states: np.ndarray | None = None) -> dict:
     r = np.log(bars["close"]).diff().dropna()
     out = {"mean": r.mean(), "vol": r.std(), "kurt": r.kurt(), "max_abs": r.abs().max(),
-           "turb_share": np.nan}
+           "turb_share": float(np.mean(states == 1)) if states is not None else np.nan}
     for lag in (1, 2, 5, 10):
         out[f"r2_acf_{lag}"] = (r**2).autocorr(lag)
+    out.update(_ohlc_shape_metrics(bars))
     if bars["volume"].max() > 0:
         out["volu_mean"] = float(bars["volume"].mean())
         out["volu_corr_absr"] = float(np.corrcoef(np.log1p(bars["volume"].iloc[1:]), np.abs(r))[0, 1])
@@ -165,10 +194,14 @@ def _sim_metrics(bars: pd.DataFrame) -> dict:
 def validation_suite(profile: AssetProfile, df_real: pd.DataFrame,
                      n_sims: int = 200, seed: int = 101) -> pd.DataFrame:
     """Phase 2 gate: simulated paths must reproduce the real data's distributional
-    and time-series properties (returns, squared-return ACF, extremes, volume)."""
+    and time-series properties (returns, squared-return ACF, extremes, candle
+    internals, regime mix, volume)."""
     real = _real_metrics(profile, df_real)
     n = len(df_real) - 1
-    sims = [_sim_metrics(simulate(profile, n, seed=seed + i)) for i in range(n_sims)]
+    sims = []
+    for i in range(n_sims):
+        bars, dbg = simulate(profile, n, seed=seed + i, debug=True)
+        sims.append(_sim_metrics(bars, states=dbg["states"]))
 
     rows = []
     for metric, target in real.items():
