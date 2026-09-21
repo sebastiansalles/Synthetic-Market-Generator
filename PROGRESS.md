@@ -119,3 +119,37 @@ Cross-session memory: what's done, decisions made, current state. Append a dated
 
 **Next**
 - Commit; Phase 2: `simulate(profile, n_candles, scenario?) → OHLCV[]` wrapping `simulate_profile_conditional`; intra-candle ticks → bars; full validation suite vs frozen targets.
+
+## Data-volume strategy (discussed, 2026-09-18)
+
+- **More years**: at the practical limit for these assets — bounded by economic non-stationarity (euro pre-1999, gold price-fixed pre-1971), not data availability. Longer history adds regime contamination, not signal.
+- **Smaller timeframes**: the one axis adding *new* information (jump identification, intraday dynamics) — and required for Phase 2's tick simulator. Caveats: effective sample size grows sublinearly under dependence; microstructure noise (≥5-min bars / pre-averaging); intraday seasonality; Yahoo intraday capped at ~730d → better source (Dukascopy/Polygon/exchange APIs) when tick realism demands it.
+- **More markets**: generality proof now (BTC-USD stresses every config axis: 365d calendar, real volume, different regimes), copula correlation panel in Phase 6 per brief.
+- **Architecture decision**: daily EOD = calibration backbone; intraday = execution-dynamics layer; multi-asset = Phase 6 surface.
+- **Phase 2 additions agreed**: asset registry (ticker/calendar/ppy/scrub defaults), volume module (vol process w/ volume–vol correlation; FX zeros documented or tick-proxy), volume stats added to frozen targets, BTC-USD as plug-and-play proof.
+
+## Session 7 — 2026-09-18 — Phase 2: stochastic core (engine + notebook §10)
+
+**Done**
+- `engine/synthetic/registry.py`: `AssetSpec` (ticker/calendar/ppy/scrub/volume semantics), `REGISTRY` with eurusd/xauusd/btcusd; `data.py` iterates registry (`download --only keys`); `calibrate(df, asset=...)` auto-pulls spec (BTC → 365d calendar, zero code changes).
+- `engine/synthetic/volume.py`: per-state log-volume, winsorized return-surprise driver (z cap 95th pct), AR(1) with clamp ±0.9 + stationary-variance-preserving innov_std, per-state mean anchoring; FX (no tape) → disabled → zeros (LEAN convention). `AssetProfile.volume`.
+- `engine/synthetic/simulate.py`: `Scenario(force_state, n_candles)` (forced stretch, chain resumes), `scenario_states`, intra-candle Brownian bridge → OHLC, `simulate_ticks` (returns tick stream for Phase 4), `simulate(...) → validated OHLCV` (seeded, reproducible), `validation_suite` (mean/vol/kurt/max|r|/r²-ACF×4/turb-share/volume×3, seeded bands). `conditional_returns` extracted in calibration (returns + h path shared).
+- GARCH sim normalization: ω renormalized so recursion attractor = sample state variance (level from data, dynamics from fit) — removes 3–6% vol bias of near-unit-root fits.
+- BTC-USD downloaded (4,388 daily bars 2014–2026 + 17,241 hourly) — registry plug-and-play proven.
+- Hourly hygiene pass (calendar-aware): eurusd_1h 2 corrupt pairs/1 gap/33 kept spikes; btcusd_1h 1 pair/0 gaps/22 spikes.
+- 40 tests passing; notebook §10 (41 cells) executed headlessly.
+
+**Bugs found by the gate & fixed (all regression-tested)**
+- `_sim_metrics` computed r²-ACF on raw returns (missing square) — suite showed 0 clustering.
+- `fit_garch_t` (arch rescale=True) reported μ/ω in scaled units — divide by `res.scale`.
+- `np.polyfit` slope/intercept SWAP in volume fit (returns `[p1, p0]`) — the real explosion cause.
+- AR clamp without variance preservation; log-volume clip truncating the tail the arithmetic mean needs (clip removed; z-cap keeps sims bounded).
+
+**Validation suite results (150 seeded sims/asset) — the gate discriminates**
+- EUR/USD **8/8 PASS** (returns, extremes, r²-ACF, volume).
+- XAU/USD **9/11**: named residuals only (r²-ACF lag-10; volume ACF hairline 0.881 vs 0.899).
+- BTC/USD **4/11**, every failure attributable: fat tails/crash size (2-state can't make a −46% day → parked crash state), clustering overshoot (era-dependent mixture), volume persistence (BTC volume trended ~1000× over sample). Zero code changes calibrated the new asset — and the suite named exactly which documented limits matter.
+
+**Phase 2 status: engine complete and gated.** Remaining per brief: LEAN export (Phase 5), tick-stream animation consumer (Phase 4; stream already emitted).
+
+**Next**: commit; Phase 3 (FastAPI serving profiles + simulation endpoints) or Phase 4 (canvas animation consuming `simulate_ticks`).

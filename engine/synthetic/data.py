@@ -17,9 +17,8 @@ logger = logging.getLogger(__name__)
 OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 PRICE_COLUMNS = ["open", "high", "low", "close"]
 
-# GC=F (COMEX gold futures) is the standard liquid XAU/USD proxy on Yahoo; spot
-# XAUUSD=X exists but has patchier history.
-ASSETS = {"eurusd": "EURUSD=X", "xauusd": "GC=F"}
+from synthetic.registry import REGISTRY  # noqa: E402  (asset config: ticker/calendar/scrub)
+
 INTERVAL_PERIODS = {"1h": "720d", "1d": "max"}  # Yahoo caps 1h history at ~730 days
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -135,22 +134,28 @@ def _summary(df: pd.DataFrame) -> str:
     return f"{len(df):>7} rows | {df['timestamp'].iloc[0]} -> {df['timestamp'].iloc[-1]}"
 
 
-def download(raw_dir: Path = DEFAULT_RAW_DIR, processed_dir: Path = DEFAULT_PROCESSED_DIR) -> None:
-    for name, ticker in ASSETS.items():
+def download(raw_dir: Path = DEFAULT_RAW_DIR, processed_dir: Path = DEFAULT_PROCESSED_DIR,
+             keys: list[str] | None = None) -> None:
+    for key, spec in REGISTRY.items():
+        if keys and key not in keys:
+            continue
         for interval in INTERVAL_PERIODS:
-            raw_path = fetch_raw(ticker, interval, raw_dir)
-            dest = processed_dir / f"{name}_{interval}.parquet"
+            raw_path = fetch_raw(spec.yahoo_ticker, interval, raw_dir)
+            dest = processed_dir / f"{key}_{interval}.parquet"
             df = build_processed(raw_path, dest)
-            print(f"[ok] {name:6s} {interval}: {_summary(df)}  ->  {dest.name}")
+            print(f"[ok] {key:6s} {interval}: {_summary(df)}  ->  {dest.name}")
 
 
-def rebuild(processed_dir: Path = DEFAULT_PROCESSED_DIR, raw_dir: Path = DEFAULT_RAW_DIR) -> None:
-    for name, ticker in ASSETS.items():
+def rebuild(processed_dir: Path = DEFAULT_PROCESSED_DIR, raw_dir: Path = DEFAULT_RAW_DIR,
+            keys: list[str] | None = None) -> None:
+    for key, spec in REGISTRY.items():
+        if keys and key not in keys:
+            continue
         for interval in INTERVAL_PERIODS:
-            raw_path = raw_dir / f"{ticker}_{interval}.csv"
-            dest = processed_dir / f"{name}_{interval}.parquet"
+            raw_path = raw_dir / f"{spec.yahoo_ticker}_{interval}.csv"
+            dest = processed_dir / f"{key}_{interval}.parquet"
             df = build_processed(raw_path, dest)
-            print(f"[ok] {name:6s} {interval}: {_summary(df)}  ->  {dest.name}")
+            print(f"[ok] {key:6s} {interval}: {_summary(df)}  ->  {dest.name}")
 
 
 def main() -> None:
@@ -162,8 +167,10 @@ def main() -> None:
         default="download",
         help="download: fetch from Yahoo + build Parquet; rebuild: Parquet from existing raw CSVs",
     )
+    parser.add_argument("--only", help="comma-separated registry keys to process (default: all)")
     args = parser.parse_args()
-    rebuild() if args.command == "rebuild" else download()
+    keys = args.only.split(",") if args.only else None
+    rebuild(keys=keys) if args.command == "rebuild" else download(keys=keys)
 
 
 if __name__ == "__main__":

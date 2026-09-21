@@ -423,7 +423,7 @@ def garch_unconditional_var(g: dict) -> float:
 
 @dataclass
 class AssetProfile:
-    """The Phase 1 output contract: everything the Phase 2 simulator consumes."""
+    """The Phase 1/2 contract: everything the simulator and validation consume."""
 
     asset: str
     periods_per_year: int
@@ -437,6 +437,7 @@ class AssetProfile:
     hmm: HMMRegimes
     state_innov_df: np.ndarray  # per-state Student-t df on state-standardized residuals
     scrub: ScrubReport
+    volume: object = None  # VolumeModel; None/False-y means "emit zeros"
 
 
 def fit_state_innovation_df(r: pd.Series, hmm: HMMRegimes, min_days: int = 30) -> np.ndarray:
@@ -456,11 +457,22 @@ def fit_state_innovation_df(r: pd.Series, hmm: HMMRegimes, min_days: int = 30) -
     return dfs
 
 
-def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int = 252,
+def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int | None = None,
               n_states: int = 2, seed: int = 0) -> AssetProfile:
-    """Full Phase 1 pipeline: OHLCV frame -> scrubbed returns -> fitted AssetProfile."""
+    """Full calibration pipeline: OHLCV frame -> scrubbed returns -> AssetProfile.
+
+    `periods_per_year` and scrub gap tolerance default to the asset's registry spec
+    (plug-and-play): calibrate(df, asset="btcusd") uses a 365-day calendar."""
+    from synthetic.registry import REGISTRY
+    from synthetic.volume import fit_volume
+
+    spec = REGISTRY.get(asset)
+    if periods_per_year is None:
+        periods_per_year = spec.ppy_daily if spec else 252
+    max_gap_days = spec.scrub_max_gap_days if spec else 6.0
+
     r = log_returns(df)
-    clean, report = scrub_returns(r)
+    clean, report = scrub_returns(r, max_gap_days=max_gap_days)
     hmm = fit_hmm_regimes(clean, n_states=n_states, seed=seed)
     return AssetProfile(
         asset=asset,
@@ -475,6 +487,7 @@ def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int = 
         hmm=hmm,
         state_innov_df=fit_state_innovation_df(clean, hmm),
         scrub=report,
+        volume=fit_volume(df, clean, hmm),
     )
 
 
@@ -578,11 +591,11 @@ def simulate_garch_t(params: dict, n: int, rng) -> np.ndarray:
     return params["mu"] + eps
 
 
-def simulate_profile_conditional(profile: AssetProfile, n: int, rng) -> np.ndarray:
-    """Regime-switching GARCH(1,1)-t: Markov regime path, per-state GARCH recursion.
-    Conditional variance re-initializes at the new state's unconditional level on
-    every regime switch. This is the Phase 2 simulator's daily core."""
-    states = simulate_regimes(profile.hmm, n, rng)
+def conditional_returns(profile: AssetProfile, states: np.ndarray, rng) -> tuple[np.ndarray, np.ndarray]:
+    """Per-state GARCH(1,1)-t returns for a GIVEN regime path; also returns the
+    conditional variance path h (the OHLC bridge needs it). Variance re-initializes
+    at the new state's unconditional level on every regime switch."""
+    n = len(states)
     g = [_sim_safe_garch(x) for x in profile.state_garch]
     mu = np.array([x["mu"] for x in g])[states]
     omega = np.array([x["omega"] for x in g])[states]
@@ -593,6 +606,7 @@ def simulate_profile_conditional(profile: AssetProfile, n: int, rng) -> np.ndarr
 
     z = rng.standard_t(nu, n) / np.sqrt(nu / (nu - 2))  # unit-variance t, per-state df
     r = np.empty(n)
+    h_path = np.empty(n)
     h = uncond[0]
     prev = states[0]
     for t in range(n):
@@ -601,7 +615,17 @@ def simulate_profile_conditional(profile: AssetProfile, n: int, rng) -> np.ndarr
             prev = states[t]
         eps = np.sqrt(h) * z[t]
         r[t] = mu[t] + eps
+        h_path[t] = h
         h = omega[t] + alpha[t] * eps**2 + beta[t] * h
+    return r, h_path
+
+
+def simulate_profile_conditional(profile: AssetProfile, n: int, rng) -> np.ndarray:
+    """Regime-switching GARCH(1,1)-t with the regime path drawn from the fitted
+    Markov chain. This is the Phase 2 simulator's daily core; `simulate()` in
+    synthetic.simulate builds OHLCV bars on top of it."""
+    states = simulate_regimes(profile.hmm, n, rng)
+    r, _ = conditional_returns(profile, states, rng)
     return r
 
 
@@ -612,11 +636,12 @@ def hmm_bic(loglik: float, n: int, n_states: int) -> float:
 
 
 def _sim_safe_garch(g: dict) -> dict:
-    """Clamp GARCH persistence to <=0.999 for simulation, rescaling omega so the
-    unconditional level is preserved (stationary approximation of an IGARCH fit)."""
+    """Normalize a fitted GARCH dict for simulation: clamp persistence to <=0.999
+    and renormalize omega so the recursion's attractor equals the data's sample
+    variance. Level comes from data, dynamics (alpha/beta) from the fit — this
+    removes the systematic ~3-6% vol bias of near-unit-root fits whose analytic
+    omega/(1-a-b) drifts from the sample level."""
     a, b = min(g["alpha"], 0.5), g["beta"]
-    if a + b <= 0.999:
-        return g
-    level = garch_unconditional_var(g)
-    b2 = 0.999 - a
-    return {**g, "alpha": a, "beta": b2, "omega": level * (1.0 - a - b2)}
+    if a + b >= 0.999:
+        b = 0.999 - a
+    return {**g, "alpha": a, "beta": b, "omega": g["uncond_var"] * (1.0 - a - b)}
