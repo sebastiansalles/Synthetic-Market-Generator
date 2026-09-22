@@ -44,6 +44,24 @@ describe("store hardening", () => {
     expect(useStore.getState().bars).toEqual([]);
   });
 
+  it("clamps live-mode panning against the streamed bars, not the empty static set", () => {
+    // `bars` stays [] during a live session; clamping against it pinned the offset
+    // to <= -1, so the first pan threw the view off the data entirely
+    const s = useStore.getState();
+    s.startLive();
+    for (let i = 0; i < 40; i++) {
+      useStore.getState().applyWsEvent({ type: "bar_open", bar_id: i, open: 1, state: 0 });
+      useStore.getState().applyWsEvent({
+        type: "bar_close", bar_id: i, high: 1.1, low: 0.9, close: 1.05, volume: 0, state: 0,
+      });
+    }
+    useStore.setState({ viewport: { offset: 10, candlesPerPixel: 0.05 } });
+    useStore.getState().panByPx(-200, 800); // drag left, towards the newest bars
+    expect(useStore.getState().viewport.offset).toBeGreaterThan(0);
+    expect(useStore.getState().viewport.offset).toBeLessThanOrEqual(39);
+    useStore.getState().stopLive();
+  });
+
   it("stopLive clears the session so the static refetch has nothing stale to flash", () => {
     const s = useStore.getState();
     s.startLive();
@@ -56,7 +74,7 @@ describe("store hardening", () => {
   it("zoom keeps live-follow; pan and reset hand control back", () => {
     const s = useStore.getState();
     s.startLive();
-    useStore.getState().zoomAtPx(100, 1.2);
+    useStore.getState().zoomAtPx(100, 1.2, 800);
     expect(useStore.getState().follow).toBe(true);
     useStore.getState().panByPx(10, 800);
     expect(useStore.getState().follow).toBe(false);

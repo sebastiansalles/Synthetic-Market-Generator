@@ -18,7 +18,7 @@ interface ChartState {
   setAsset: (a: string) => void;
   setBars: (bars: Candle[], asset: string) => void;
   setStatus: (s: string) => void;
-  zoomAtPx: (anchorPx: number, factor: number) => void;
+  zoomAtPx: (anchorPx: number, factor: number, widthPx: number) => void;
   panByPx: (dxPx: number, widthPx: number) => void;
   resetView: () => void;
   startLive: () => void;
@@ -31,6 +31,12 @@ const defaultViewport = (nBars: number): Viewport => ({
   offset: 0,
   candlesPerPixel: Math.max(0.2, nBars / 1500),
 });
+
+/** Bars currently on screen. In live mode the session lives in `live`, not `bars` —
+ *  clamping navigation against `bars.length` (0 while live) pushed the view off the
+ *  data the moment the user panned. */
+const displayCount = (s: ChartState): number =>
+  s.live ? s.live.bars.length + (s.live.forming ? 1 : 0) : s.bars.length;
 
 export const useStore = create<ChartState>((set, get) => ({
   asset: "eurusd",
@@ -60,8 +66,9 @@ export const useStore = create<ChartState>((set, get) => ({
   stopLive: () => set({ live: null, bars: [] }), // no stale flash while static refetches
   setCrosshair: (crosshair) => set({ crosshair }),
   // zooming never fights the live-follow; panning hands control to the user
-  zoomAtPx: (anchorPx, factor) => set({ viewport: zoomAt(get().viewport, anchorPx, factor) }),
+  zoomAtPx: (anchorPx, factor, widthPx) =>
+    set({ viewport: zoomAt(get().viewport, anchorPx, factor, widthPx, displayCount(get())) }),
   panByPx: (dxPx, widthPx) =>
-    set({ viewport: panBy(get().viewport, dxPx, widthPx, get().bars.length), follow: false }),
-  resetView: () => set({ viewport: defaultViewport(get().bars.length), follow: true }),
+    set({ viewport: panBy(get().viewport, dxPx, widthPx, displayCount(get())), follow: false }),
+  resetView: () => set({ viewport: defaultViewport(displayCount(get())), follow: true }),
 }));

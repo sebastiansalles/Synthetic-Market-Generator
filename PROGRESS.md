@@ -330,5 +330,33 @@ run has not been done. Docker is available on this machine, so `pip install lean
 `lean backtest` against an exported bundle is the real closing step.
 
 **Open**
-- Chart navigation quality (zoom/pan feel) — user-reported twice, now a tracked defect.
 - Phase 5 gate: run a LEAN backtest over an exported bundle.
+
+## Session 17 — 2026-09-22 — Chart navigation defect (user-reported twice)
+
+Diagnosed rather than guessed. Four distinct causes behind "zooming isn't great":
+
+- **Wheel zoom ignored `deltaY` magnitude** — a flat 1.15x per event. A mouse notch
+  sends `deltaY: 100` once; a trackpad sends a stream of small deltas for one
+  gesture, so a single swipe compounded 1.15 a dozen-plus times. This was the main
+  complaint. Replaced with `wheelZoomFactor`: exponential in actual pixels moved,
+  `deltaMode` normalized (lines/pages -> px), clamped to [1/3, 3] so no single event
+  can teleport the view.
+- **Pinch gestures were treated as ordinary wheel events.** Browsers report a pinch
+  as ctrl+wheel with its own small deltas; it now gets its own sensitivity.
+- **`zoomAt` never clamped the offset** — only `panBy` did. Zooming out near an edge
+  stranded the viewport off the data, which then yanked the price autoscale. Extracted
+  `clampOffset`, shared by both.
+- **Live-mode navigation clamped against `bars.length`, which is 0 during a session**
+  (the streamed bars live in `live.bars`). `Math.min(offset, n-1)` therefore pinned the
+  offset to <= -1, so the first pan in live mode threw the view off the data. Added
+  `displayCount()` and routed pan/zoom/reset through it.
+
+Also fixed the swapped MIN_CPP/MAX_CPP comments (MIN is furthest zoom *in*, not out).
+
+**Validation**: 40 vitest (+8: wheel-factor scaling/symmetry/delta-modes/clamping,
+zoom bounds, live-mode pan clamp); tsc + build clean.
+
+**Still unverified in a browser**: feel is subjective and there is no browser
+automation here — the wheel/pinch behaviour needs a human hand on a trackpad.
+Momentum/inertia scrolling remains unimplemented (deferred since Session 11).

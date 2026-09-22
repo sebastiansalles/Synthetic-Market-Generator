@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { layoutCandles, volumeProfile } from "../engine/candles";
 import { drawChart } from "../engine/renderer";
-import { followOffset, priceToY } from "../engine/viewport";
+import { followOffset, priceToY, wheelZoomFactor } from "../engine/viewport";
 import { useStore } from "../store";
 
 const AXIS_WIDTH = 64;
@@ -118,7 +118,7 @@ export function Chart() {
       const w = canvasRef.current?.clientWidth ?? 1200;
       if (frames % 120 === 0) dir *= -1;
       s.panByPx(6 * dir, w);
-      if (frames % 60 === 0) s.zoomAtPx(w / 2, dir > 0 ? 1.05 : 0.95);
+      if (frames % 60 === 0) s.zoomAtPx(w / 2, dir > 0 ? 1.05 : 0.95, w);
       frames += 1;
       const now = performance.now();
       if (now - t0 >= 1000) {
@@ -157,8 +157,8 @@ export function Chart() {
           const w = e.currentTarget.clientWidth - AXIS_WIDTH;
           if (e.key === "ArrowLeft") s.panByPx(w * 0.15, w);
           else if (e.key === "ArrowRight") s.panByPx(-w * 0.15, w);
-          else if (e.key === "+" || e.key === "=") s.zoomAtPx(w / 2, 1 / 1.3);
-          else if (e.key === "-") s.zoomAtPx(w / 2, 1.3);
+          else if (e.key === "+" || e.key === "=") s.zoomAtPx(w / 2, 1 / 1.3, w);
+          else if (e.key === "-") s.zoomAtPx(w / 2, 1.3, w);
           else if (e.key.toLowerCase() === "r") s.resetView();
           else return;
           e.preventDefault();
@@ -166,7 +166,10 @@ export function Chart() {
         onWheel={(e) => {
           e.preventDefault();
           const rect = e.currentTarget.getBoundingClientRect();
-          useStore.getState().zoomAtPx(e.clientX - rect.left, e.deltaY > 0 ? 1.15 : 1 / 1.15);
+          const w = e.currentTarget.clientWidth - AXIS_WIDTH;
+          // ctrlKey on a wheel event is how browsers report a pinch gesture
+          const factor = wheelZoomFactor(e.deltaY, e.deltaMode, e.ctrlKey);
+          useStore.getState().zoomAtPx(e.clientX - rect.left, factor, w);
         }}
         onPointerDown={(e) => {
           e.currentTarget.setPointerCapture(e.pointerId);
