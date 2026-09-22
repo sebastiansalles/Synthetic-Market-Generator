@@ -49,6 +49,89 @@ button:hover {
   margin-left: auto;
   color: #8b949e;
 }
+.workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.workflow {
+  width: 260px;
+  flex: none;
+  overflow-y: auto;
+  padding: 12px;
+  border-right: 1px solid #30363d;
+  background: #010409;
+}
+.workflow section {
+  margin-bottom: 18px;
+}
+.workflow h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b949e;
+}
+.workflow .step {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #1f6feb;
+  color: #fff;
+  font-size: 10px;
+}
+.workflow select,
+.workflow input {
+  width: 100%;
+}
+.workflow input {
+  background: #161b22;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+}
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.field span {
+  color: #8b949e;
+}
+.hint {
+  margin: 6px 0 0;
+  color: #6e7681;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.seg,
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.presets button {
+  flex: 1 1 calc(50% - 4px);
+}
+.seg button.on,
+.presets button.on {
+  border-color: #1f6feb;
+  background: #14304f;
+  color: #cae3ff;
+}
+.workflow button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 .chart-wrap {
   position: relative;
   flex: 1;

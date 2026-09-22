@@ -265,3 +265,70 @@ Full review of the uncommitted Phase 3→4 delta before committing it. Nine defe
 **Still the user's gate** (no browser automation in this environment): watch a full live session for smoothness, crosshair behavior while panned, and the 60fps check via `?bench=1`.
 
 **Next**: Phase 5 — exports (CSV/Parquet, LEAN-compatible), three-step workflow, reproducibility controls, scenario presets.
+
+## Session 16 — 2026-09-22 — Phase 5: workflow + export pipeline
+
+**Phase 4 gate: PASSED** (user watched a full live session). Caveat recorded by the
+user: *chart navigation (zoom especially) is not good enough*. Second time this has
+come up (Session 11) — now tracked as a defect, not a nicety. See **Open** below.
+
+**Key research finding — LEAN is not one schema.** QuantConnect stores daily/hour
+data differently per security type, which reshaped the export design:
+
+| Asset | LEAN type | Data kind | Columns | Path |
+|---|---|---|---|---|
+| btcusd | crypto | **trade** | `time,o,h,l,c,volume` | `crypto/bitfinex/daily/btcusd_trade.zip` |
+| eurusd | forex | **quote** | `time,bid{OHLC},bidSize,ask{OHLC},askSize` | `forex/oanda/daily/eurusd.zip` |
+| xauusd | cfd | **quote** | same 11 columns | `cfd/oanda/daily/xauusd.zip` |
+
+Timestamps are `YYYYMMDD HH:mm`; no price scaling at daily/hour (deci-cents are an
+equity-only convention); each zip holds one identically-named headerless CSV.
+
+**Done**
+- `engine/synthetic/export.py`: `aggregate_bars` (daily→weekly/monthly, bucket labelled
+  by its FIRST bar so nothing is stamped into the future), `lean_rows` (per-security-type
+  layout), `lean_relative_path`, `export_bytes` (csv/parquet/lean), `read_lean_zip`
+  (reads the bundle back the way LEAN's reader would), `ExportManifest` (engine version,
+  seed, scenario, resolution, SHA-256 of the payload, row count).
+- Quote synthesis: forex/CFD carry no trade prints, so bid/ask are the simulated mid
+  ± half the instrument's typical spread (`lean_spread_bps` in the registry: EUR/USD
+  0.9, XAU/USD 1.5 — a **documented assumption, not a calibrated quantity**). Bid/ask
+  *sizes* are 0: the simulator models no depth and inventing it would be fabricating data.
+- **Jump injection** (`Scenario.jump_at` / `jump_return`): the shock enters the GARCH
+  innovation *before* the variance update, so the aftershock volatility is the model's
+  own rather than a second layer of hand-tuning. This is the Merton jump layer daily
+  data structurally could not identify (Session 4) — injected as a scenario, not fitted.
+- Scenario presets (`SCENARIO_PRESETS` + `build_scenario`): standard / turbulent open /
+  flash crash / prolonged crisis. Crash magnitude is **8 turbulent-state daily sigmas
+  taken from the asset's own profile**, so a preset means the same *severity* across
+  markets rather than the same percentage.
+- API: `GET /workflow` (one round trip: resolutions, formats, presets, caps),
+  `POST /export` (file download + `Content-Disposition`), `preset` and `resolution`
+  accepted by `POST /simulate` too — the chart shows exactly what `/export` writes.
+- Web: `WorkflowPanel` — the brief's three steps (market → resolution & span →
+  scenario) plus reproducibility (seed) and export buttons; asset selection moved out
+  of the toolbar into step 1.
+
+**Bug caught during the build**: `build_scenario` initially divided `state_vol` by
+√ppy to get a daily sigma — but `state_vol` is *already* per-period (`state_vol_ann`
+is the annualizing accessor). Would have made every crash ~16x too small.
+
+**Validation** — 101 pytest (+34) / 32 vitest (+5); `tsc` + `vite build` clean.
+E2E against a live server, all three security types:
+- Bundles land at the correct LEAN paths, rows are non-ragged (11/11/6 cols),
+  timestamps parse with LEAN's own format string and are monotonic.
+- 1000 daily → 201 weekly → 46 monthly, OHLC contract intact at every resolution.
+- Flash crash severity scales as intended: EUR/USD −7.9%, XAU/USD −14.8%, **BTC −45.3%**
+  — within a whisker of the real −46% day the 2-state model provably could not produce
+  (the documented BTC validation failure). Post-crash 30-day vol runs 1.2–1.7x the
+  pre-crash level: the GARCH aftershock is real, not injected.
+- Byte-identical payloads for a repeated spec (reproducibility).
+
+**Phase 5 gate: NOT yet closed.** The gate is "ingests cleanly into an external
+backtesting framework". Format conformance and read-back are proven; an actual LEAN
+run has not been done. Docker is available on this machine, so `pip install lean` +
+`lean backtest` against an exported bundle is the real closing step.
+
+**Open**
+- Chart navigation quality (zoom/pan feel) — user-reported twice, now a tracked defect.
+- Phase 5 gate: run a LEAN backtest over an exported bundle.

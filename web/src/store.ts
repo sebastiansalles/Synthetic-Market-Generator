@@ -8,6 +8,8 @@ interface ChartState {
   bars: Candle[];
   seed: number;
   nCandles: number;
+  resolution: string;
+  preset: string;
   viewport: Viewport;
   status: string;
   live: LiveState | null;
@@ -35,6 +37,8 @@ export const useStore = create<ChartState>((set, get) => ({
   bars: [],
   seed: 2026,
   nCandles: 1500,
+  resolution: "daily",
+  preset: "standard",
   viewport: { offset: 0, candlesPerPixel: 1 }, // matches defaultViewport(1500): no snap on first data
   status: "idle",
   live: null,

@@ -30,12 +30,80 @@ from synthetic.volume import simulate_volume
 
 @dataclass(frozen=True)
 class Scenario:
-    """Inject a forced regime stretch: `force_state` for `n_candles` candles from the
-    start of the path, then the Markov chain resumes naturally (transitions continue
-    from the forced state). Used for stress tests ("60 turbulent days")."""
+    """Stress-test controls, applied on top of the calibrated model.
+
+    Regime forcing: `force_state` for `n_candles` candles from the start of the path,
+    then the Markov chain resumes naturally (transitions continue from the forced
+    state). `n_candles=0` forces nothing.
+
+    Jump injection: a log-return shock of `jump_return` at candle `jump_at`. The
+    2-state model provably cannot produce a crash of this size on its own — that is
+    the documented BTC validation failure — so a crash is *injected* as a scenario
+    rather than fitted. It enters the GARCH recursion, so the aftershock volatility
+    is the model's, not a second piece of hand-tuning."""
 
     force_state: int = 1  # canonical: 1 = turbulent
     n_candles: int = 60
+    jump_at: int | None = None
+    jump_return: float = 0.0
+
+    def jump_path(self, n: int) -> np.ndarray | None:
+        """The per-candle shock vector this scenario applies, or None if it has no jump."""
+        if self.jump_at is None or self.jump_return == 0.0:
+            return None
+        if not 0 <= self.jump_at < n:
+            raise ValueError(f"jump_at {self.jump_at} outside a {n}-candle path")
+        shocks = np.zeros(n)
+        shocks[self.jump_at] = self.jump_return
+        return shocks
+
+
+@dataclass(frozen=True)
+class ScenarioPreset:
+    key: str
+    label: str
+    description: str
+
+
+SCENARIO_PRESETS: tuple[ScenarioPreset, ...] = (
+    ScenarioPreset("standard", "Standard",
+                   "The calibrated model, unforced — the asset's own regime mix."),
+    ScenarioPreset("turbulent", "Turbulent open",
+                   "Opens with 60 forced turbulent candles, then the chain resumes."),
+    ScenarioPreset("flash_crash", "Flash crash",
+                   "A calm run, then an 8-sigma single-candle collapse the model "
+                   "absorbs through its own GARCH aftershock."),
+    ScenarioPreset("crisis", "Prolonged crisis",
+                   "A sustained turbulent regime — a third of the path forced."),
+)
+
+FLASH_CRASH_SIGMA = 8.0  # turbulent-state daily sigmas; ~1-in-a-generation, not fitted
+
+
+def build_scenario(preset: str, n_candles: int, profile: AssetProfile) -> Scenario | None:
+    """Turn a preset key into a concrete Scenario for this asset and path length.
+
+    Crash magnitude is scaled by the asset's own turbulent-state volatility rather
+    than fixed in return units, so 'flash crash' means the same *severity* for
+    EUR/USD as for Bitcoin instead of the same percentage."""
+    known = {p.key for p in SCENARIO_PRESETS}
+    if preset not in known:
+        raise ValueError(f"unknown scenario preset '{preset}' (have: {sorted(known)})")
+    if preset == "standard":
+        return None
+    if preset == "turbulent":
+        return Scenario(force_state=1, n_candles=min(60, n_candles))
+    if preset == "crisis":
+        return Scenario(force_state=1, n_candles=max(1, n_candles // 3))
+
+    # state_vol is already per-period (daily); state_vol_ann is the annualized view
+    turbulent_daily_sigma = float(profile.hmm.state_vol[-1])
+    return Scenario(
+        force_state=1,
+        n_candles=0,  # the crash arrives out of a normal market, not a forced one
+        jump_at=int(n_candles * 0.6),
+        jump_return=-FLASH_CRASH_SIGMA * turbulent_daily_sigma,
+    )
 
 
 def scenario_states(profile: AssetProfile, n: int, scenario: Scenario | None, rng) -> np.ndarray:
@@ -68,7 +136,8 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
     callers (validation_suite) pass return_ticks=False for ~10x speed."""
     rng = np.random.default_rng(seed)
     states = scenario_states(profile, n_candles, scenario, rng)
-    returns, h = conditional_returns(profile, states, rng)
+    jumps = scenario.jump_path(n_candles) if scenario else None
+    returns, h = conditional_returns(profile, states, rng, jumps=jumps)
     volumes = simulate_volume(profile.volume, returns, states, profile.hmm.state_vol, rng)
     timestamps = _daily_timestamps(profile, n_candles)
     # Intrabar increments use the SAME per-state Student-t innovation family as the
@@ -133,7 +202,8 @@ def simulate(profile: AssetProfile, n_candles: int, scenario: Scenario | None = 
         return bars
     rng = np.random.default_rng(seed)
     states = scenario_states(profile, n_candles, scenario, rng)
-    returns, h = conditional_returns(profile, states, rng)
+    jumps = scenario.jump_path(n_candles) if scenario else None
+    returns, h = conditional_returns(profile, states, rng, jumps=jumps)
     return bars, {"states": states, "returns": returns, "h": h}
 
 

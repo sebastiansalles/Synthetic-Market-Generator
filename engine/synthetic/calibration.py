@@ -593,10 +593,16 @@ def simulate_garch_t(params: dict, n: int, rng) -> np.ndarray:
     return params["mu"] + eps
 
 
-def conditional_returns(profile: AssetProfile, states: np.ndarray, rng) -> tuple[np.ndarray, np.ndarray]:
+def conditional_returns(profile: AssetProfile, states: np.ndarray, rng,
+                        jumps: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Per-state GARCH(1,1)-t returns for a GIVEN regime path; also returns the
     conditional variance path h (the OHLC bridge needs it). Variance re-initializes
-    at the new state's unconditional level on every regime switch."""
+    at the new state's unconditional level on every regime switch.
+
+    `jumps` (log-return shocks, one per candle, mostly zero) enters the innovation
+    BEFORE the variance update, so a shock propagates into the GARCH recursion and
+    the model produces its own aftershock volatility. Adding the shock to the
+    returned series afterwards would give a crash with an implausibly calm sequel."""
     n = len(states)
     g = [_sim_safe_garch(x) for x in profile.state_garch]
     mu = np.array([x["mu"] for x in g])[states]
@@ -607,6 +613,9 @@ def conditional_returns(profile: AssetProfile, states: np.ndarray, rng) -> tuple
     uncond = np.array([garch_unconditional_var(x) for x in g])[states]
 
     z = rng.standard_t(nu, n) / np.sqrt(nu / (nu - 2))  # unit-variance t, per-state df
+    shock = np.zeros(n) if jumps is None else np.asarray(jumps, dtype=float)
+    if len(shock) != n:
+        raise ValueError(f"jumps has length {len(shock)}, expected {n}")
     r = np.empty(n)
     h_path = np.empty(n)
     h = uncond[0]
@@ -615,7 +624,7 @@ def conditional_returns(profile: AssetProfile, states: np.ndarray, rng) -> tuple
         if states[t] != prev:
             h = uncond[t]
             prev = states[t]
-        eps = np.sqrt(h) * z[t]
+        eps = np.sqrt(h) * z[t] + shock[t]
         r[t] = mu[t] + eps
         h_path[t] = h
         h = omega[t] + alpha[t] * eps**2 + beta[t] * h

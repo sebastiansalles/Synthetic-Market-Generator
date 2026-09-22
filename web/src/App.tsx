@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { getHealth, listProfiles, ProfileSummary, simulate } from "./api";
+import {
+  getHealth,
+  getWorkflow,
+  listProfiles,
+  ProfileSummary,
+  simulate,
+  WorkflowOptions,
+} from "./api";
 import { Chart } from "./components/Chart";
+import { WorkflowPanel } from "./components/WorkflowPanel";
 import { WsEvent } from "./engine/live";
 import { useStore } from "./store";
 
@@ -9,11 +17,14 @@ const LIVE_CANDLES = 400;
 export function App() {
   const [profiles, setProfiles] = useState<Record<string, ProfileSummary>>({});
   const [apiVersion, setApiVersion] = useState<string>("");
+  const [options, setOptions] = useState<WorkflowOptions | null>(null);
   // per-field selectors, not the whole store: a live session replaces `live` on every
   // tick, and subscribing wholesale would re-render App (and re-run effects) at tick rate
   const asset = useStore((s) => s.asset);
   const seed = useStore((s) => s.seed);
   const nCandles = useStore((s) => s.nCandles);
+  const resolution = useStore((s) => s.resolution);
+  const preset = useStore((s) => s.preset);
   const status = useStore((s) => s.status);
   const hasBars = useStore((s) => s.bars.length > 0);
   const isLive = useStore((s) => s.live !== null);
@@ -29,6 +40,7 @@ export function App() {
     getHealth()
       .then((h) => setApiVersion(h.version))
       .catch(() => setApiVersion("unreachable"));
+    getWorkflow().then(setOptions).catch(() => undefined);
     listProfiles()
       .then((p) => {
         setProfiles(p);
@@ -46,13 +58,21 @@ export function App() {
   useEffect(() => {
     if (!asset || isLive) return;
     setStatus(`simulating ${asset}…`);
-    simulate(asset, nCandles, seed, profilesRef.current[asset]?.last_close)
+    simulate({
+      asset,
+      nCandles,
+      seed,
+      resolution,
+      preset,
+      startPrice: profilesRef.current[asset]?.last_close,
+    })
       .then((b) => {
         setBars(b, asset);
-        setStatus(`${b.length} candles · seed ${seed}`);
+        const scope = preset === "standard" ? "" : ` · ${preset}`;
+        setStatus(`${b.length} ${resolution} candles · seed ${seed}${scope}`);
       })
       .catch((e) => setStatus(`simulation failed: ${e.message}`));
-  }, [asset, nCandles, seed, isLive, setBars, setStatus]);
+  }, [asset, nCandles, seed, resolution, preset, isLive, setBars, setStatus]);
 
   const startLive = () => {
     const s = useStore.getState();
@@ -91,13 +111,6 @@ export function App() {
     <div className="app">
       <header className="toolbar">
         <span className="brand">Synthetic Market Generator</span>
-        <select value={asset} onChange={(e) => setAsset(e.target.value)} disabled={isLive}>
-          {Object.entries(profiles).map(([k, p]) => (
-            <option key={k} value={k}>
-              {p.display_name}
-            </option>
-          ))}
-        </select>
         <button onClick={() => useStore.setState({ seed: seed + 1 })} disabled={isLive}>
           ↻ new seed
         </button>
@@ -112,15 +125,16 @@ export function App() {
           </button>
         )}
         <span className="status">{status}</span>
-        {summary && (
-          <span className="meta">
-            σ {summary.state_vol_ann.map((v) => (v * 100).toFixed(0) + "%").join(" / ")} · dwell{" "}
-            {summary.expected_dwell_days.map((d) => d.toFixed(0) + "d").join(" / ")} ·{" "}
-            {summary.volume_mode} · engine {apiVersion}
-          </span>
-        )}
+        {/* profile stats live in workflow step 1; the toolbar keeps the version
+            handshake that makes a stale server visible at a glance */}
+        <span className="meta">
+          {summary ? `${summary.volume_mode} · ` : ""}engine {apiVersion}
+        </span>
       </header>
-      {hasBars || isLive ? <Chart /> : <div className="empty">loading…</div>}
+      <div className="workspace">
+        <WorkflowPanel profiles={profiles} options={options} disabled={isLive} />
+        {hasBars || isLive ? <Chart /> : <div className="empty">loading…</div>}
+      </div>
     </div>
   );
 }

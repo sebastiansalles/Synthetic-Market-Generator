@@ -238,6 +238,96 @@ def test_websocket_scenario_forces_opening_regime():
     assert open_states[:3] == [1, 1, 1]  # deterministic forced stretch
 
 
+def test_workflow_options_drive_the_wizard():
+    body = client.get("/workflow").json()
+    assert "daily" in body["resolutions"] and "weekly" in body["resolutions"]
+    assert body["formats"] == ["lean", "csv", "parquet"]
+    keys = [p["key"] for p in body["presets"]]
+    assert "standard" in keys and "flash_crash" in keys
+    assert all(p["description"] for p in body["presets"])
+
+
+def test_export_returns_a_lean_bundle_as_a_download():
+    import io
+    import zipfile
+
+    resp = client.post("/export", json={"asset": "eurusd", "n_candles": 120, "seed": 4,
+                                        "fmt": "lean", "resolution": "daily"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    assert "eurusd_daily_lean.zip" in resp.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        names = zf.namelist()
+    assert "forex/oanda/daily/eurusd.zip" in names
+    assert "manifest.json" in names
+
+
+def test_export_manifest_records_the_scenario_that_produced_it():
+    import io
+    import json
+    import zipfile
+
+    resp = client.post("/export", json={"asset": "eurusd", "n_candles": 200, "seed": 9,
+                                        "fmt": "lean", "preset": "flash_crash"})
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["seed"] == 9
+    assert manifest["scenario"]["jump_at"] == 120
+    assert manifest["scenario"]["jump_return"] < 0
+    assert manifest["rows"] == 200
+
+
+def test_export_csv_and_parquet_formats():
+    csv = client.post("/export", json={"asset": "eurusd", "n_candles": 50, "fmt": "csv"})
+    assert csv.status_code == 200 and csv.headers["content-type"].startswith("text/csv")
+    assert csv.content.splitlines()[0].decode().startswith("timestamp,open")
+
+    pq = client.post("/export", json={"asset": "eurusd", "n_candles": 50, "fmt": "parquet"})
+    assert pq.status_code == 200
+    assert pq.content[:4] == b"PAR1"  # parquet magic
+
+
+def test_export_aggregates_to_the_requested_resolution():
+    daily = client.post("/export", json={"asset": "eurusd", "n_candles": 260, "fmt": "csv"})
+    weekly = client.post("/export", json={"asset": "eurusd", "n_candles": 260, "fmt": "csv",
+                                          "resolution": "weekly"})
+    assert len(weekly.content.splitlines()) < len(daily.content.splitlines())
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [({"asset": "eurusd", "fmt": "hdf5"}, "unknown format"),
+     ({"asset": "eurusd", "resolution": "hourly"}, "unknown resolution"),
+     ({"asset": "eurusd", "preset": "armageddon"}, "unknown scenario preset")],
+)
+def test_export_rejects_unknown_options(payload, expected):
+    resp = client.post("/export", json={"n_candles": 50, **payload})
+    assert resp.status_code == 422
+    assert expected in resp.json()["detail"]
+
+
+def test_simulate_accepts_a_preset_and_scales_it_to_the_asset():
+    """The same preset must mean the same severity, not the same percentage."""
+    import numpy as np
+
+    out = {}
+    for asset in ("eurusd", "xauusd"):
+        bars = client.post("/simulate", json={"asset": asset, "n_candles": 200, "seed": 3,
+                                              "preset": "flash_crash"}).json()["bars"]
+        closes = np.array([b["close"] for b in bars])
+        out[asset] = np.log(closes[1:] / closes[:-1]).min()
+    assert out["eurusd"] < -0.02 and out["xauusd"] < -0.02  # both crashed
+    assert out["xauusd"] < out["eurusd"]  # gold is the more volatile asset
+
+
+def test_simulate_rejects_a_jump_outside_the_path():
+    resp = client.post("/simulate", json={"asset": "eurusd", "n_candles": 50,
+                                          "scenario": {"n_candles": 0, "jump_at": 400,
+                                                       "jump_return": -0.1}})
+    assert resp.status_code == 422
+    assert "outside a" in resp.json()["detail"]
+
+
 @pytest.mark.parametrize(
     "params, expected",
     [("n_candles=0", "n_candles"),

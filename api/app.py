@@ -10,11 +10,12 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,9 +23,16 @@ from pydantic import BaseModel, Field
 
 from synthetic.calibration import AssetProfile, calibrate
 from synthetic.data import DEFAULT_PROCESSED_DIR
+from synthetic.export import RESOLUTIONS, ExportManifest, aggregate_bars, export_bytes
 from synthetic.profile_store import DEFAULT_PROFILE_DIR, load_profile, save_profile
 from synthetic.registry import REGISTRY
-from synthetic.simulate import Scenario, simulate, simulate_ticks
+from synthetic.simulate import (
+    SCENARIO_PRESETS,
+    Scenario,
+    build_scenario,
+    simulate,
+    simulate_ticks,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -149,7 +157,9 @@ def get_profile(asset: str) -> dict:
 
 class ScenarioIn(BaseModel):
     force_state: int = Field(default=1, ge=0)
-    n_candles: int = Field(default=60, ge=1)
+    n_candles: int = Field(default=60, ge=0)  # 0 = force nothing (jump-only scenarios)
+    jump_at: int | None = None
+    jump_return: float = 0.0
 
 
 class SimulateIn(BaseModel):
@@ -159,21 +169,93 @@ class SimulateIn(BaseModel):
     ticks_per_candle: int = Field(default=24, ge=1, le=MAX_TICKS_PER_CANDLE)
     start_price: float | None = Field(default=None)  # default: the asset's last real close
     scenario: ScenarioIn | None = None
+    preset: str | None = None  # takes precedence: scaled to the asset's own volatility
+    resolution: str = "daily"  # the chart shows exactly what /export would write
+
+
+def _resolve_scenario(body: SimulateIn | ExportIn, profile: AssetProfile) -> Scenario | None:
+    """A preset wins over explicit fields — it is the asset-aware form of the same thing."""
+    if body.preset:
+        try:
+            return build_scenario(body.preset, body.n_candles, profile)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+    if body.scenario is None:
+        return None
+    return Scenario(**body.scenario.model_dump())
+
+
+@app.get("/workflow")
+def workflow_options() -> dict:
+    """Everything the three-step workflow needs to render itself in one round trip."""
+    return {
+        "resolutions": sorted(RESOLUTIONS),
+        "formats": ["lean", "csv", "parquet"],
+        "presets": [{"key": p.key, "label": p.label, "description": p.description}
+                    for p in SCENARIO_PRESETS],
+        "max_candles": MAX_SIM_CANDLES,
+    }
 
 
 @app.post("/simulate")
 def simulate_endpoint(body: SimulateIn) -> dict:
     profile = _get_profile(body.asset)
     start_price = body.start_price if body.start_price is not None else profile.last_close
-    scenario = (Scenario(force_state=body.scenario.force_state,
-                         n_candles=body.scenario.n_candles)
-                if body.scenario else None)
-    bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
-                    ticks_per_candle=body.ticks_per_candle, start_price=start_price)
+    scenario = _resolve_scenario(body, profile)
+    try:
+        bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
+                        ticks_per_candle=body.ticks_per_candle, start_price=start_price)
+        bars = aggregate_bars(bars, body.resolution)
+    except ValueError as exc:  # e.g. a jump placed outside the path, or a bad resolution
+        raise HTTPException(422, str(exc))
     records = bars.copy()
     records["timestamp"] = pd.to_datetime(records["timestamp"]).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"asset": body.asset, "seed": body.seed, "n_candles": len(records),
-            "bars": records.to_dict(orient="records")}
+            "resolution": body.resolution, "bars": records.to_dict(orient="records")}
+
+
+class ExportIn(BaseModel):
+    asset: str
+    n_candles: int = Field(default=500, ge=1, le=MAX_SIM_CANDLES)  # daily bars simulated
+    seed: int = 0
+    resolution: str = "daily"
+    fmt: str = "lean"
+    start_price: float | None = None
+    scenario: ScenarioIn | None = None
+    preset: str | None = None
+
+
+_MEDIA_TYPES = {"csv": "text/csv", "parquet": "application/vnd.apache.parquet",
+                "lean": "application/zip"}
+
+
+@app.post("/export")
+def export_endpoint(body: ExportIn) -> Response:
+    """Phase 5 gate: a simulated run as a file an external backtester can ingest.
+
+    The engine simulates daily bars; coarser resolutions are aggregations of that
+    same path (one code path), and the returned bundle carries the manifest that
+    makes the run reproducible."""
+    profile = _get_profile(body.asset)
+    start_price = body.start_price if body.start_price is not None else profile.last_close
+    scenario = _resolve_scenario(body, profile)
+    try:
+        bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
+                        start_price=start_price)
+        bars = aggregate_bars(bars, body.resolution)
+        manifest = ExportManifest(
+            asset=body.asset, seed=body.seed, n_candles=body.n_candles,
+            resolution=body.resolution, start_price=float(start_price),
+            scenario=(asdict(scenario) if scenario else None),
+        )
+        payload, filename = export_bytes(bars, body.asset, body.fmt, body.resolution, manifest)
+    except ValueError as exc:  # unknown format/resolution/preset, or a bad jump index
+        raise HTTPException(422, str(exc))
+    return Response(
+        content=payload,
+        media_type=_MEDIA_TYPES.get(body.fmt, "application/octet-stream"),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/profiles/{asset}/recalibrate", status_code=202)
