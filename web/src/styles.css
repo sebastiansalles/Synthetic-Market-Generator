@@ -1,0 +1,82 @@
+:root {
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: #0d1117;
+  color: #c9d1d9;
+  font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #30363d;
+  background: #010409;
+}
+.brand {
+  color: #58a6ff;
+  font-weight: 700;
+}
+select,
+button {
+  background: #161b22;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+button:hover {
+  border-color: #58a6ff;
+}
+.status {
+  color: #8b949e;
+}
+.meta {
+  margin-left: auto;
+  color: #8b949e;
+}
+.chart-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.chart-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  cursor: grab;
+}
+.chart-canvas:active {
+  cursor: grabbing;
+}
+.fps {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: #010409cc;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: #3fb950;
+  font-size: 16px;
+}
+.empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: #8b949e;
+}

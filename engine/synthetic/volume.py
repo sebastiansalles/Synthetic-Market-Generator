@@ -78,7 +78,7 @@ def simulate_volume(model: VolumeModel, r: np.ndarray, states: np.ndarray,
                     state_vol: np.ndarray, rng) -> np.ndarray:
     """Generate a volume path for simulated returns; zeros when the model is disabled."""
     n = len(r)
-    if not model.enabled:
+    if model is None or not model.enabled:
         return np.zeros(n)
     z = np.minimum(np.abs(r) / state_vol[states], model.z_cap)
     e = np.empty(n)

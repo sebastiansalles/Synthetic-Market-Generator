@@ -167,3 +167,30 @@ Cross-session memory: what's done, decisions made, current state. Append a dated
 **Suite after consolidation (150 seeded sims)**: EUR 11/13 · XAU 10/16 · BTC 7/16 — all remaining CHECKs have names (intrabar microstructure, parked crash state, era effects, hairlines). The suite maps the frontier instead of rubber-stamping.
 
 **Next**: commit; Phase 3 (FastAPI serving persisted profiles + simulation endpoints) or Phase 4.
+
+## Session 9 — 2026-09-18 — Phase 3: serving layer + canvas renderer
+
+**Done**
+- `api/app.py` (FastAPI): `/health`, `/assets`, `/profiles` (list), `/profiles/{asset}` (summary w/ numpy-safe serialization), `POST /simulate` (seeded, scenario support, n_candles cap 10k for JSON), `POST /profiles/{asset}/recalibrate` (202; re-runs calibration from processed Parquet, persists). 8 TestClient tests.
+- `web/`: React 19 + TS + Vite + Zustand scaffold; custom Canvas 2D engine (no chart libs): `engine/viewport.ts` (anchored zoom, clamped pan, niceTicks), `engine/candles.ts` (visible-window layout, autoscale pad), `engine/renderer.ts` (single-pass draw, dark theme, price axis + dates + volume pane). 10 Vitest tests on the pure math; `tsc --noEmit && vite build` clean.
+- `Chart.tsx`: wheel-zoom @ cursor, drag-pan, dblclick reset, DPR-aware canvas; `?bench=1` runs scripted pan/zoom with fps overlay (for the 60fps gate — needs a browser; design is redraw-on-change with zero per-frame allocation outside the visible window).
+- Vite dev proxy → :8000; root .gitignore extended (node_modules/dist/__pycache__); profiles re-persisted under current schema (old pickles predated `volume`).
+- E2E smoke against live uvicorn: profiles list, 1500-candle simulate, 404s — all green. Engine: 51 pytest green.
+
+**Run**: `.venv/bin/uvicorn app:app --app-dir api --port 8000` + `cd web && npm run dev` → http://localhost:5173 (append `?bench=1` for fps).
+
+**Phase 3 gate status**: renderer implemented per spec; 1,000+ candle @ 60fps verification is a browser check (`?bench=1`) — design supports it (only visible window drawn, redraw on interaction only). Pending: user verification.
+
+## Session 10 — 2026-09-18 — Pre-Phase-4 hardening (audit items 1–8), Phase 3 committed
+
+**Done**
+- Renderer O(n²) volume loop fixed (was `indexOf` inside the draw loop — gate-relevant at 1,000+ visible candles).
+- `Chart.tsx`: redraws coalesced to one-per-animation-frame via rAF; `ResizeObserver` keeps canvas honest on window resize; draw reads store imperatively (no React re-render per pan tick).
+- API: CORS middleware (`SMG_CORS_ORIGINS`, default `*`); mtime-keyed in-memory profile cache (recalibrate self-invalidates); catch-all exception handler → clean JSON 500 (HTTPException falls through); `web/dist` mounted at `/` (StaticFiles, API keeps precedence) — single-port serving verified (`GET /` → index.html, `/health` → 200).
+- Vite proxy: `/ws` stub with `ws: true` (Phase 4 WebSocket prerequisite).
+- New tests: CORS preflight, profile-cache hit count, corrupt-pickle 500 (TestClient with `raise_server_exceptions=False`), static mount + API precedence. 55 pytest / 10 vitest green; `npm run build` clean; npm audit 0 vulnerabilities.
+- **Gotcha recorded:** `kill %1` in a fresh Bash call is a no-op — a stale uvicorn from an earlier smoke was silently serving old code; background servers must be killed by PID/`pkill -f`.
+
+**Run (single port)**: `.venv/bin/uvicorn app:app --app-dir api --port 8000` → http://localhost:8000 (app) — or `cd web && npm run dev` for HMR at :5173. `?bench=1` for the fps gate.
+
+**Next**: browser-verify 60fps gate; Phase 4 (WebSocket `/ws` tick stream → live candle animation, regime heatmap overlay) or Phase 5 (exports + workflow).

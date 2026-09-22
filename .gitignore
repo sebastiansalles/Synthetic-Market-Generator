@@ -10,3 +10,9 @@ dist/
 
 # Raw market data is re-downloadable; validated Parquet in data/processed/ IS committed
 data/raw/
+
+# Phase 3 artifacts
+web/node_modules/
+web/dist/
+api/__pycache__/
+*.pyc
