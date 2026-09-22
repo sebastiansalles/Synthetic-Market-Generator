@@ -120,19 +120,33 @@ def scenario_states(profile: AssetProfile, n: int, scenario: Scenario | None, rn
 
 
 def _daily_timestamps(profile: AssetProfile, n: int,
-                      end_date: str | pd.Timestamp | None = None) -> pd.DatetimeIndex:
-    """Timestamps for a simulated path, anchored so the run ENDS at `end_date`
-    (default: today).
+                      end_date: str | pd.Timestamp | None = None,
+                      start_date: str | pd.Timestamp | None = None) -> pd.DatetimeIndex:
+    """Timestamps for a simulated path. `start_date` anchors the run forward from a
+    date; otherwise it is anchored to END at `end_date` (default: today). Passing
+    `start_date` wins.
 
-    Ending at the present rather than starting at a fixed date matters for export:
-    a run stamped into the future is silently unusable, because backtesters refuse
-    to replay dates that have not happened yet. A LEAN run over a future-dated
-    500-bar export replayed only the 227 bars before today and skipped the injected
-    crash entirely."""
+    The two anchors serve genuinely different purposes and neither is right for both:
+
+    - Forward (`start_date`, typically the bar after the profile's last real one):
+      the path reads as a possible *future*, which is what the simulator is for.
+      Overlaying synthetic prices on dates that really happened invites the chart to
+      be misread as history.
+    - Backward (`end_date`): required for export. Backtesters refuse to replay dates
+      that have not happened, and they do it silently — a future-dated 500-bar LEAN
+      export replayed only the 227 bars before today and skipped the injected crash
+      with no error at all."""
+    spec = REGISTRY.get(profile.asset)
+    freq_daily = bool(spec and spec.calendar == "crypto")
+    if start_date is not None:
+        start = pd.Timestamp(start_date)
+        start = start.tz_localize(None) if start.tz is not None else start
+        if freq_daily:
+            return pd.date_range(start=start, periods=n, freq="D")
+        return pd.bdate_range(start=start, periods=n)
     end = pd.Timestamp(end_date) if end_date is not None else pd.Timestamp.now("UTC").normalize()
     end = end.tz_localize(None) if end.tz is not None else end
-    spec = REGISTRY.get(profile.asset)
-    if spec and spec.calendar == "crypto":
+    if freq_daily:
         return pd.date_range(end=end, periods=n, freq="D")
     return pd.bdate_range(end=end, periods=n)
 
@@ -140,6 +154,7 @@ def _daily_timestamps(profile: AssetProfile, n: int,
 def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
                    scenario: Scenario | None = None, ticks_per_candle: int = 24,
                    start_price: float = 100.0, end_date: str | None = None,
+                   start_date: str | None = None,
                    return_ticks: bool = True) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     """Simulate a full path. Returns (bars, ticks): bars is a validated OHLCV frame
     (one row per candle); ticks — None unless return_ticks — carries the intra-candle
@@ -150,7 +165,7 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
     jumps = scenario.jump_path(n_candles) if scenario else None
     returns, h = conditional_returns(profile, states, rng, jumps=jumps)
     volumes = simulate_volume(profile.volume, returns, states, profile.hmm.state_vol, rng)
-    timestamps = _daily_timestamps(profile, n_candles, end_date)
+    timestamps = _daily_timestamps(profile, n_candles, end_date, start_date)
     # Intrabar increments use the SAME per-state Student-t innovation family as the
     # daily GARCH core (nu <= 2.1 falls back to Gaussian) — Phase 1's central
     # finding was fat-tailed innovations; Gaussian ticks would contradict it.
@@ -203,12 +218,14 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
 
 def simulate(profile: AssetProfile, n_candles: int, scenario: Scenario | None = None,
              seed: int = 0, ticks_per_candle: int = 24, start_price: float = 100.0,
-             end_date: str | None = None, debug: bool = False):
+             end_date: str | None = None, start_date: str | None = None,
+             debug: bool = False):
     """simulate(profile, n_candles, scenario?) -> OHLCV[] (validated). Seeded and
     reproducible; pass debug=True to also get the latent state/return/vol paths."""
     bars, _ = simulate_ticks(profile, n_candles, seed=seed, scenario=scenario,
                              ticks_per_candle=ticks_per_candle, start_price=start_price,
-                             end_date=end_date, return_ticks=False)
+                             end_date=end_date, start_date=start_date,
+                             return_ticks=False)
     if not debug:
         return bars
     rng = np.random.default_rng(seed)

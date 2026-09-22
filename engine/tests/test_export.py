@@ -277,6 +277,30 @@ def test_runs_end_in_the_past_so_backtesters_can_replay_them(profiles):
     assert pd.DatetimeIndex(bars["timestamp"]).min() < today  # a real span, not all one day
 
 
+def test_start_date_projects_the_run_forward(profiles):
+    """The chart anchors forward from the last real bar so a synthetic path is not
+    drawn over dates that actually happened and misread as history."""
+    p = profiles["eurusd"]
+    bars = simulate(p, 120, seed=2, start_date="2030-01-02", start_price=p.last_close)
+    ts = pd.DatetimeIndex(bars["timestamp"])
+    assert ts.min() == pd.Timestamp("2030-01-02")
+    assert ts.is_monotonic_increasing
+    assert bars["open"].iloc[0] == pytest.approx(p.last_close)
+
+
+def test_start_date_wins_over_end_date(profiles):
+    p = profiles["eurusd"]
+    bars = simulate(p, 50, seed=2, start_date="2030-01-02", end_date="2020-01-01",
+                    start_price=p.last_close)
+    assert pd.DatetimeIndex(bars["timestamp"]).min() == pd.Timestamp("2030-01-02")
+
+
+def test_profiles_carry_the_last_real_date(profiles):
+    for p in profiles.values():
+        assert p.last_date is not None
+        assert pd.Timestamp(p.last_date) <= pd.Timestamp.now("UTC").normalize().tz_localize(None)
+
+
 def test_end_date_is_explicit_when_given(profiles):
     p = profiles["eurusd"]
     bars = simulate(p, 100, seed=1, end_date="2020-06-30", start_price=p.last_close)

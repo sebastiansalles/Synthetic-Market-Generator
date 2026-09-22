@@ -410,3 +410,62 @@ filtered, per the Session 8 hygiene rule).
 **Next**: Phase 6 (stretch) — saved reproducible run library, WebGL path if canvas
 bottlenecks, multi-asset generation with copula correlation. Chart navigation feel
 (Session 17) still wants a human on a trackpad; momentum scrolling unimplemented.
+
+## Session 19 — 2026-09-22 — User-reported UI bugs + calibration honesty pass
+
+User ran the app. Three reports, all valid; a fourth issue found while investigating.
+
+**1. Zoom zoomed the whole page, not the chart.** React registers `wheel` handlers
+as **passive**, so `e.preventDefault()` inside `onWheel` is silently ignored and the
+browser runs its own page zoom — worst with ctrl+wheel, which is exactly how trackpad
+pinch arrives. The Session 17 pinch handling was therefore never reaching the canvas:
+a bug inside the previous fix. Now a native listener registered with
+`{ passive: false }`.
+
+**2. Live candles rendered as hairlines.** `startLive` never reset the viewport, so a
+session opening with ~5 bars inherited the static view's zoom (1500 candles at ~1 px
+each) and drew 1-px-wide candles. `LIVE_VIEWPORT` (0.125 cpp ≈ 8 px/candle) is now
+applied on start; `follow` keeps the tail in frame.
+
+**3. Charts overlaid synthetic prices on real historical dates.** Session 18 anchored
+runs to END today so LEAN could replay them — which made every chart span 2020–2026,
+dates that actually happened, inviting it to be read as history. But flipping back
+reintroduces the silent-truncation bug. **Two anchors, each correct for its job:**
+
+| Surface | Anchor | Why |
+|---|---|---|
+| `/simulate` (chart) | forward from `last_date` | reads as a possible future, which is what the simulator claims to produce |
+| `/export` | ends today | backtesters silently refuse future dates |
+
+`AssetProfile` gains `last_date`; profiles recalibrated and re-persisted (eurusd
+2026-09-18, xauusd 2026-09-17, btcusd 2026-09-21). Verified: a 300-bar EUR/USD chart
+run now spans 2026-09-21 → 2027-11-12 opening at 1.14837 (= the real last close),
+while the CSV export of the same spec spans 2025-07-30 → 2026-09-22.
+
+**4. Found while investigating: `/profiles` reported the wrong volatility.**
+`annual_vol` returned `student_t.params["sigma"]` — the Student-t **scale**. For BTC
+(df = 2.27, a near-infinite-variance fit) the scale is not the asset's volatility and
+read **103.2% against 65.7% realized**. Now reports realized vol from the frozen
+targets; the scale is kept as `t_scale_ann`.
+
+**"Bitcoin reaches millions" — measured, not a bug.** Decomposed:
+- drift alone over 1500 bars: **6.6x** — not the cause
+- variance compounding is: sims run **70.1% ann vol** (target 65.7%), and 1500 bars at
+  `ppy=365` is **4.1 years**, so `sd(log P) = 0.70 x sqrt(4.1) = 1.42` and +2sd ~ 17x.
+  From $86,005 that is ~$1.5M. Six seeds gave 0.4x–14.1x.
+
+The model is behaving correctly. What is genuinely weak is **presentation and
+calibration era**: nothing tells the user that 1500 bars means 4.1 years for BTC but
+6.0 for EUR/USD, and vol is fitted on all history (65.7%) while BTC's recent era runs
+**47.6%** (2014-17 69.7% / 2018-20 75.7% / 2021-23 64.5% / 2024-26 47.6%) — the same
+era-contamination already documented for the regime mix in Session 6.
+
+**Validation**: 108 pytest (+5) / 40 vitest; tsc + build clean.
+
+**Open / candidates for Phase 6**
+- Horizon legibility: show the span in *years* per asset, not just a bar count.
+- Era-weighted or windowed calibration (recency weighting), so BTC vol is not pinned
+  to its 2014-17 era. Affects every asset; needs its own gate.
+- Drift controls (calibrated / zero / custom): `se(mu_ann)` for BTC is **29.8pp** on a
+  45.7%/yr estimate — the drift is barely identified yet compounds over years.
+- Chart momentum/inertia still unimplemented.

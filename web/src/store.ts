@@ -32,6 +32,10 @@ const defaultViewport = (nBars: number): Viewport => ({
   candlesPerPixel: Math.max(0.2, nBars / 1500),
 });
 
+/** ~8 px per candle: wide enough to read a body and wick while still showing a
+ *  meaningful stretch of the session on a normal window. */
+export const LIVE_VIEWPORT: Viewport = { offset: 0, candlesPerPixel: 0.125 };
+
 /** Bars currently on screen. In live mode the session lives in `live`, not `bars` —
  *  clamping navigation against `bars.length` (0 while live) pushed the view off the
  *  data the moment the user panned. */
@@ -61,7 +65,10 @@ export const useStore = create<ChartState>((set, get) => ({
       return { bars, viewport: s.bars.length > 0 ? s.viewport : defaultViewport(bars.length) };
     }),
   setStatus: (status) => set({ status }),
-  startLive: () => set({ live: initLive(), follow: true }),
+  // A live session starts with a handful of bars but inherits the static view's zoom
+  // (1500 candles squeezed to ~1 px each), so candles rendered as hairlines. Reset to
+  // a zoom sized for a forming session; `follow` then keeps the tail in view.
+  startLive: () => set({ live: initLive(), follow: true, viewport: LIVE_VIEWPORT }),
   applyWsEvent: (ev) => set((s) => (s.live ? { live: reduceEvent(s.live, ev) } : {})),
   stopLive: () => set({ live: null, bars: [] }), // no stale flash while static refetches
   setCrosshair: (crosshair) => set({ crosshair }),

@@ -104,7 +104,11 @@ def profile_summary(p: AssetProfile) -> dict:
         "periods_per_year": p.periods_per_year,
         "n_bars": p.n_bars,
         "targets": {k: _f(v) for k, v in p.targets.items()},
-        "annual_vol": _f(p.student_t.params["sigma"]),
+        # realized volatility of the clean returns, not the Student-t scale: with a
+        # near-infinite-variance fit (BTC df=2.27) the scale is not the asset's
+        # volatility and reported 103% against 66% realized
+        "annual_vol": _f(p.targets["vol"] * np.sqrt(p.periods_per_year)),
+        "t_scale_ann": _f(p.student_t.params["sigma"]),
         "t_df": _f(p.student_t.params["df"]),
         "state_vol_ann": [_f(v) for v in h.state_vol_ann(p.periods_per_year)],
         "state_mean_bp_day": [_f(m * 1e4) for m in h.state_mean],
@@ -117,6 +121,7 @@ def profile_summary(p: AssetProfile) -> dict:
                   "n_gap": p.scrub.n_gap, "n_kept_spikes": p.scrub.n_kept_spikes},
         "volume_mode": "modeled" if (p.volume and p.volume.enabled) else "zeros (no centralized tape)",
         "last_close": _f(getattr(p, "last_close", 100.0)),
+        "last_date": getattr(p, "last_date", None),
     }
 
 
@@ -171,7 +176,8 @@ class SimulateIn(BaseModel):
     scenario: ScenarioIn | None = None
     preset: str | None = None  # takes precedence: scaled to the asset's own volatility
     resolution: str = "daily"  # the chart shows exactly what /export would write
-    end_date: str | None = None  # default: today, so the run never lands in the future
+    end_date: str | None = None
+    start_date: str | None = None  # default: the bar after the profile's last real one
 
 
 def _resolve_scenario(body: SimulateIn | ExportIn, profile: AssetProfile) -> Scenario | None:
@@ -184,6 +190,14 @@ def _resolve_scenario(body: SimulateIn | ExportIn, profile: AssetProfile) -> Sce
     if body.scenario is None:
         return None
     return Scenario(**body.scenario.model_dump())
+
+
+def _forward_start(profile: AssetProfile) -> str | None:
+    """The bar after the asset's last real one. Charting a run over dates that really
+    happened invites it to be read as history; a projection forward from the last real
+    close is what the simulator actually claims to produce."""
+    last = getattr(profile, "last_date", None)
+    return str((pd.Timestamp(last) + pd.Timedelta(days=1)).date()) if last else None
 
 
 @app.get("/workflow")
@@ -204,9 +218,14 @@ def simulate_endpoint(body: SimulateIn) -> dict:
     start_price = body.start_price if body.start_price is not None else profile.last_close
     scenario = _resolve_scenario(body, profile)
     try:
+        # the chart projects forward; /export stays anchored in the past so the data
+        # remains replayable by a backtester
+        start_date = body.start_date
+        if start_date is None and body.end_date is None:
+            start_date = _forward_start(profile)
         bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
                         ticks_per_candle=body.ticks_per_candle, start_price=start_price,
-                        end_date=body.end_date)
+                        end_date=body.end_date, start_date=start_date)
         bars = aggregate_bars(bars, body.resolution)
     except ValueError as exc:  # e.g. a jump placed outside the path, or a bad resolution
         raise HTTPException(422, str(exc))

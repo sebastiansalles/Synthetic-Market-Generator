@@ -439,6 +439,7 @@ class AssetProfile:
     scrub: ScrubReport
     volume: object = None  # VolumeModel; None/False-y means "emit zeros"
     last_close: float = 100.0  # anchor: simulations start from the last real close
+    last_date: str | None = None  # anchor: simulations continue forward from this bar
 
 
 def fit_state_innovation_df(r: pd.Series, hmm: HMMRegimes, min_days: int = 30) -> np.ndarray:
@@ -490,6 +491,7 @@ def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int | 
         scrub=report,
         volume=fit_volume(df, clean, hmm),
         last_close=float(df["close"].iloc[-1]),
+        last_date=str(pd.Timestamp(df["timestamp"].iloc[-1]).date()),
     )
 
 

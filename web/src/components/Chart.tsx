@@ -108,6 +108,25 @@ export function Chart() {
     };
   }, [scheduleDraw]);
 
+  // Wheel must be a NATIVE non-passive listener: React registers wheel handlers as
+  // passive, so preventDefault() inside onWheel is silently ignored and the browser
+  // zooms the whole page instead of the chart (ctrl+wheel especially, which is also
+  // how trackpad pinch arrives).
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const w = canvas.clientWidth - AXIS_WIDTH;
+      useStore
+        .getState()
+        .zoomAtPx(e.clientX - rect.left, wheelZoomFactor(e.deltaY, e.deltaMode, e.ctrlKey), w);
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, []);
+
   useEffect(() => {
     if (!bench) return;
     let frames = 0;
@@ -162,14 +181,6 @@ export function Chart() {
           else if (e.key.toLowerCase() === "r") s.resetView();
           else return;
           e.preventDefault();
-        }}
-        onWheel={(e) => {
-          e.preventDefault();
-          const rect = e.currentTarget.getBoundingClientRect();
-          const w = e.currentTarget.clientWidth - AXIS_WIDTH;
-          // ctrlKey on a wheel event is how browsers report a pinch gesture
-          const factor = wheelZoomFactor(e.deltaY, e.deltaMode, e.ctrlKey);
-          useStore.getState().zoomAtPx(e.clientX - rect.left, factor, w);
         }}
         onPointerDown={(e) => {
           e.currentTarget.setPointerCapture(e.pointerId);

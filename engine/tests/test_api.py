@@ -238,6 +238,30 @@ def test_websocket_scenario_forces_opening_regime():
     assert open_states[:3] == [1, 1, 1]  # deterministic forced stretch
 
 
+def test_simulate_projects_forward_but_export_stays_backtestable():
+    """Two anchors on purpose: the chart must not overlay synthetic prices on dates
+    that really happened, and the export must not land in the future where a
+    backtester would silently refuse to replay it."""
+    summary = client.get("/profiles/eurusd").json()
+    last_real = pd.Timestamp(summary["last_date"])
+
+    bars = client.post("/simulate", json={"asset": "eurusd", "n_candles": 100}).json()["bars"]
+    assert pd.Timestamp(bars[0]["timestamp"][:10]) > last_real
+
+    csv = client.post("/export", json={"asset": "eurusd", "n_candles": 100, "fmt": "csv"})
+    rows = csv.content.decode().splitlines()[1:]
+    today = pd.Timestamp.now("UTC").normalize().tz_localize(None)
+    assert pd.Timestamp(rows[-1].split(",")[0][:10]) <= today
+
+
+def test_reported_annual_vol_is_realized_not_the_student_t_scale():
+    """With a near-infinite-variance t fit (BTC df ~2.3) the scale is not volatility:
+    it read 103% against 66% realized."""
+    body = client.get("/profiles/btcusd").json()
+    assert 0.5 < body["annual_vol"] < 0.85
+    assert body["t_scale_ann"] > body["annual_vol"]
+
+
 def test_workflow_options_drive_the_wizard():
     body = client.get("/workflow").json()
     assert "daily" in body["resolutions"] and "weekly" in body["resolutions"]
