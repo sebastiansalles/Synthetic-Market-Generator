@@ -82,6 +82,19 @@ export function Chart() {
       <canvas
         ref={canvasRef}
         className="chart-canvas"
+        tabIndex={0}
+        aria-label="candlestick chart: arrows pan, +/- zoom, wheel zooms, drag pans"
+        onKeyDown={(e) => {
+          const s = useStore.getState();
+          const w = e.currentTarget.clientWidth - AXIS_WIDTH;
+          if (e.key === "ArrowLeft") s.panByPx(w * 0.15, w);
+          else if (e.key === "ArrowRight") s.panByPx(-w * 0.15, w);
+          else if (e.key === "+" || e.key === "=") s.zoomAtPx(w / 2, 1 / 1.3);
+          else if (e.key === "-") s.zoomAtPx(w / 2, 1.3);
+          else if (e.key.toLowerCase() === "r") s.resetView();
+          else return;
+          e.preventDefault();
+        }}
         onWheel={(e) => {
           e.preventDefault();
           const rect = e.currentTarget.getBoundingClientRect();

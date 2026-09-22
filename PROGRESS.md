@@ -194,3 +194,26 @@ Cross-session memory: what's done, decisions made, current state. Append a dated
 **Run (single port)**: `.venv/bin/uvicorn app:app --app-dir api --port 8000` → http://localhost:8000 (app) — or `cd web && npm run dev` for HMR at :5173. `?bench=1` for the fps gate.
 
 **Next**: browser-verify 60fps gate; Phase 4 (WebSocket `/ws` tick stream → live candle animation, regime heatmap overlay) or Phase 5 (exports + workflow).
+
+## Session 11 — 2026-09-18 — UX feedback fixes (user-reported)
+
+**Done**
+- `AssetProfile.last_close`: simulations now anchor to the asset's last real close by default (`POST /simulate` gains optional `start_price`; verified: first open == last_close 1.1484 for EUR/USD) — gives the y-axis a real reference.
+- Asset-switch glitch fixed: `setAsset` clears bars immediately (loading state instead of stale cross-market frame).
+- Re-seed no longer resets zoom/pan: viewport preserved when bars already exist; overview zoom only on fresh loads (incl. after asset switch).
+- Keyboard navigation interim win: ←/→ pan, +/- zoom, R reset (canvas is focusable).
+- 58 pytest / 12 vitest green; profiles re-persisted (pickles carry `last_close`).
+
+**User-noted, deliberately deferred**: TradingView-grade navigation (crosshair, pinch, momentum) — Phase 4 scope; brief mandates a custom engine, not a clone.
+
+## Session 12 — 2026-09-18 — Seed-anchor bug (user-reported): stale-server hardening
+
+**Diagnosis**: API anchor verified correct (first open == last_close exactly); failure was environmental — a uvicorn started before the anchor fix serving old code/pickles.
+
+**Defenses (three layers)**
+- Frontend now sends `start_price` EXPLICITLY from the profile summary it already holds — a stale server-side pickle can no longer silently break the reference.
+- Version handshake: `/health` returns app version; toolbar meta shows `engine 0.2.0` — a stale server is now visible at a glance.
+- `Cache-Control: no-store` on HTML entry point — browsers can't pin an old bundle.
+- Live-verified: explicit + default anchors both → 1.148369; no-store header present. 59 pytest / 12 vitest green.
+
+**Runbook reminder**: before UI testing, `pkill -f "uvicorn app:app"` then start exactly one server; toolbar must read `engine 0.2.0`.

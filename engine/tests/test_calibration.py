@@ -361,3 +361,22 @@ def test_sim_safe_garch_tames_igarch_params():
     # level anchored at the sample variance, not blown up by omega/(1-a-b)
     assert abs(sim.std() - 0.02) < 0.2 * 0.02
     assert np.isfinite(sim).all()
+
+
+def test_profile_carries_last_real_close_anchor():
+    rng = np.random.default_rng(33)
+    transition = np.array([[0.97, 0.03], [0.06, 0.94]])
+    states = np.empty(2500, int)
+    states[0] = 0
+    for t in range(1, 2500):
+        states[t] = rng.choice(2, p=transition[states[t - 1]])
+    r_np = np.array([0.005, 0.012])[states] * rng.standard_normal(2500)
+    close = 100 * np.exp(np.cumsum(r_np))
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2021-01-01", periods=2500, freq="B"),
+            "open": close, "high": close, "low": close, "close": close, "volume": 0.0,
+        }
+    )
+    profile = calibrate(df, asset="synthetic", n_states=2, seed=0)
+    assert np.isclose(profile.last_close, close[-1])

@@ -47,6 +47,15 @@ async def engine_error_handler(request: Request, exc: Exception) -> JSONResponse
     return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
 
 
+@app.middleware("http")
+async def no_store_html(request: Request, call_next):
+    """Browsers must never cache the entry point (stale-bundle confusion)."""
+    response = await call_next(request)
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Profile cache: unpickling hits disk only when the file changes (mtime-keyed);
 # recalibrate invalidates naturally by rewriting the file.
@@ -96,6 +105,7 @@ def profile_summary(p: AssetProfile) -> dict:
         "scrub": {"n_total": p.scrub.n_total, "n_spike_revert": p.scrub.n_spike_revert,
                   "n_gap": p.scrub.n_gap, "n_kept_spikes": p.scrub.n_kept_spikes},
         "volume_mode": "modeled" if (p.volume and p.volume.enabled) else "zeros (no centralized tape)",
+        "last_close": _f(getattr(p, "last_close", 100.0)),
     }
 
 
@@ -105,7 +115,8 @@ def profile_summary(p: AssetProfile) -> dict:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "profiles_dir": str(DEFAULT_PROFILE_DIR),
+    return {"status": "ok", "version": app.version,
+            "profiles_dir": str(DEFAULT_PROFILE_DIR),
             "registered_assets": sorted(REGISTRY)}
 
 
@@ -143,17 +154,19 @@ class SimulateIn(BaseModel):
     n_candles: int = Field(default=500, ge=1, le=MAX_SIM_CANDLES)
     seed: int = 0
     ticks_per_candle: int = Field(default=24, ge=1, le=200)
+    start_price: float | None = Field(default=None)  # default: the asset's last real close
     scenario: ScenarioIn | None = None
 
 
 @app.post("/simulate")
 def simulate_endpoint(body: SimulateIn) -> dict:
     profile = _get_profile(body.asset)
+    start_price = body.start_price if body.start_price is not None else profile.last_close
     scenario = (Scenario(force_state=body.scenario.force_state,
                          n_candles=body.scenario.n_candles)
                 if body.scenario else None)
     bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
-                    ticks_per_candle=body.ticks_per_candle)
+                    ticks_per_candle=body.ticks_per_candle, start_price=start_price)
     records = bars.copy()
     records["timestamp"] = pd.to_datetime(records["timestamp"]).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"asset": body.asset, "seed": body.seed, "n_candles": len(records),

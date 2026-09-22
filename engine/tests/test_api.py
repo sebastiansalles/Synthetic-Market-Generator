@@ -169,3 +169,31 @@ def test_static_frontend_mounted_when_dist_exists():
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert client.get("/health").status_code == 200  # API keeps precedence
+
+
+def test_simulation_anchors_to_last_real_close_by_default():
+    summary = client.get("/profiles/eurusd").json()
+    body = client.post("/simulate", json={"asset": "eurusd", "n_candles": 30, "seed": 9}).json()
+    first_open = body["bars"][0]["open"]
+    assert abs(first_open - summary["last_close"]) < 1e-9
+
+    custom = client.post("/simulate", json={
+        "asset": "eurusd", "n_candles": 10, "seed": 9, "start_price": 50.0,
+    }).json()
+    assert abs(custom["bars"][0]["open"] - 50.0) < 1e-9
+
+
+def test_health_reports_version():
+    body = client.get("/health").json()
+    assert body["version"] == "0.2.0"
+
+
+def test_html_entry_point_is_not_cached():
+    from app import _DIST
+
+    if not _DIST.exists():
+        import pytest
+
+        pytest.skip("web/dist not built")
+    resp = client.get("/")
+    assert resp.headers.get("cache-control") == "no-store"

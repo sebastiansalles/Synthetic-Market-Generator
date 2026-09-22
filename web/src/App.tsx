@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
-import { listProfiles, ProfileSummary, simulate } from "./api";
+import { getHealth, listProfiles, ProfileSummary, simulate } from "./api";
 import { Chart } from "./components/Chart";
 import { useStore } from "./store";
 
 export function App() {
   const [profiles, setProfiles] = useState<Record<string, ProfileSummary>>({});
+  const [apiVersion, setApiVersion] = useState<string>("");
   const { asset, bars, seed, nCandles, status, setAsset, setBars, setStatus, resetView } =
     useStore();
 
   useEffect(() => {
+    getHealth()
+      .then((h) => setApiVersion(h.version))
+      .catch(() => setApiVersion("unreachable"));
     listProfiles()
       .then((p) => {
         setProfiles(p);
@@ -18,18 +22,18 @@ export function App() {
       .catch((e) => setStatus(`API unreachable: ${e.message}`));
   }, [setAsset, setStatus]);
 
+  const summary = profiles[asset];
+
   useEffect(() => {
     if (!asset) return;
     setStatus(`simulating ${asset}…`);
-    simulate(asset, nCandles, seed)
+    simulate(asset, nCandles, seed, summary?.last_close)
       .then((b) => {
         setBars(b, asset);
         setStatus(`${b.length} candles · seed ${seed}`);
       })
       .catch((e) => setStatus(`simulation failed: ${e.message}`));
-  }, [asset, nCandles, seed, setBars, setStatus]);
-
-  const summary = profiles[asset];
+  }, [asset, nCandles, seed, summary, setBars, setStatus]);
 
   return (
     <div className="app">
@@ -49,7 +53,7 @@ export function App() {
           <span className="meta">
             σ {summary.state_vol_ann.map((v) => (v * 100).toFixed(0) + "%").join(" / ")} · dwell{" "}
             {summary.expected_dwell_days.map((d) => d.toFixed(0) + "d").join(" / ")} ·{" "}
-            {summary.volume_mode}
+            {summary.volume_mode} · engine {apiVersion}
           </span>
         )}
       </header>

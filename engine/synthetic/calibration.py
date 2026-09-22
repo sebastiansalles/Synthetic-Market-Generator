@@ -438,6 +438,7 @@ class AssetProfile:
     state_innov_df: np.ndarray  # per-state Student-t df on state-standardized residuals
     scrub: ScrubReport
     volume: object = None  # VolumeModel; None/False-y means "emit zeros"
+    last_close: float = 100.0  # anchor: simulations start from the last real close
 
 
 def fit_state_innovation_df(r: pd.Series, hmm: HMMRegimes, min_days: int = 30) -> np.ndarray:
@@ -488,6 +489,7 @@ def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int | 
         state_innov_df=fit_state_innovation_df(clean, hmm),
         scrub=report,
         volume=fit_volume(df, clean, hmm),
+        last_close=float(df["close"].iloc[-1]),
     )
 
 
