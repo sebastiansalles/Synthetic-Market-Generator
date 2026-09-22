@@ -171,6 +171,7 @@ class SimulateIn(BaseModel):
     scenario: ScenarioIn | None = None
     preset: str | None = None  # takes precedence: scaled to the asset's own volatility
     resolution: str = "daily"  # the chart shows exactly what /export would write
+    end_date: str | None = None  # default: today, so the run never lands in the future
 
 
 def _resolve_scenario(body: SimulateIn | ExportIn, profile: AssetProfile) -> Scenario | None:
@@ -204,7 +205,8 @@ def simulate_endpoint(body: SimulateIn) -> dict:
     scenario = _resolve_scenario(body, profile)
     try:
         bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
-                        ticks_per_candle=body.ticks_per_candle, start_price=start_price)
+                        ticks_per_candle=body.ticks_per_candle, start_price=start_price,
+                        end_date=body.end_date)
         bars = aggregate_bars(bars, body.resolution)
     except ValueError as exc:  # e.g. a jump placed outside the path, or a bad resolution
         raise HTTPException(422, str(exc))
@@ -223,6 +225,7 @@ class ExportIn(BaseModel):
     start_price: float | None = None
     scenario: ScenarioIn | None = None
     preset: str | None = None
+    end_date: str | None = None
 
 
 _MEDIA_TYPES = {"csv": "text/csv", "parquet": "application/vnd.apache.parquet",
@@ -241,7 +244,7 @@ def export_endpoint(body: ExportIn) -> Response:
     scenario = _resolve_scenario(body, profile)
     try:
         bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
-                        start_price=start_price)
+                        start_price=start_price, end_date=body.end_date)
         bars = aggregate_bars(bars, body.resolution)
         manifest = ExportManifest(
             asset=body.asset, seed=body.seed, n_candles=body.n_candles,

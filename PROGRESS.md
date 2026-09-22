@@ -330,7 +330,7 @@ run has not been done. Docker is available on this machine, so `pip install lean
 `lean backtest` against an exported bundle is the real closing step.
 
 **Open**
-- Phase 5 gate: run a LEAN backtest over an exported bundle.
+- (none — Phase 5 gate closed in Session 18)
 
 ## Session 17 — 2026-09-22 — Chart navigation defect (user-reported twice)
 
@@ -360,3 +360,53 @@ zoom bounds, live-mode pan clamp); tsc + build clean.
 **Still unverified in a browser**: feel is subjective and there is no browser
 automation here — the wheel/pinch behaviour needs a human hand on a trackpad.
 Momentum/inertia scrolling remains unimplemented (deferred since Session 11).
+
+## Session 18 — 2026-09-22 — PHASE 5 GATE CLOSED: real LEAN backtest
+
+**The gate ran for real.** Not conformance tests — QuantConnect's actual engine
+replaying an exported bundle.
+
+**Setup** (`lean init` demands a QuantConnect account, so the workspace was built
+without it): `pip install lean` (CLI 1.0.229) + `docker pull quantconnect/lean`
+(**42.5 GB** — far larger than the "few GB" estimated when asking; 328 GB free, so
+no harm, but worth knowing before repeating). A hand-written `lean.json` needs only
+`data-folder` and `organization-id`; LEAN's two mandatory databases
+(`market-hours-database.json`, `symbol-properties-database.csv`) come straight from
+the Lean repo. Its registry already carries `oanda,EURUSD,forex`, matching our
+export path exactly. `lean backtest` never contacts QuantConnect.
+
+**Result — LEAN ingested our data natively, no custom importer:**
+
+| Check | Expected (simulator) | LEAN reported |
+|---|---|---|
+| bars | 500 | **500** (`fillForward=False`) |
+| first close | 1.15491 | **1.15491** |
+| last close | 0.80181 | **0.80181** |
+| injected crash | −8.19% log | **−7.87%** simple = `exp(−0.0819)−1` |
+| order | 25k EURUSD market | filled, final equity 91,283.96 |
+
+Both endpoints match exactly, so LEAN read *our prices* — not merely a file that
+parsed. The injected flash crash propagated into a real 9.70% drawdown on a live
+position: the scenario machinery survives the round trip into a third-party engine.
+
+With LEAN's default fill-forward ON it reported 600 bars; re-run with
+`fillForward=False` it reported exactly 500. Verified, not assumed — the extra 100
+were LEAN synthesizing bars for calendar days our business-day series skips.
+
+**Product defect found by running the gate (conformance tests could never catch it):**
+`_daily_timestamps` hardcoded the path to *start* at 2026-01-01. Today is 2026-09-22,
+so any run over ~190 business days was stamped **into the future**, and backtesters
+refuse to replay dates that have not happened. The first LEAN run silently replayed
+227 of 500 bars and skipped the crash entirely — no error, just a quietly truncated
+backtest. Timestamps are now anchored to *end* at `end_date` (default: today), with
+the date exposed through `/simulate` and `/export`. Regression-tested.
+
+**Validation**: 103 pytest (+2) / 40 vitest; warning-free (the new code initially
+tripped a pandas-4 `Timestamp.utcnow` deprecation — fixed at source rather than
+filtered, per the Session 8 hygiene rule).
+
+**Phase 5 status: COMPLETE, gate closed.** All six roadmap phases are now done.
+
+**Next**: Phase 6 (stretch) — saved reproducible run library, WebGL path if canvas
+bottlenecks, multi-asset generation with copula correlation. Chart navigation feel
+(Session 17) still wants a human on a trackpad; momentum scrolling unimplemented.

@@ -265,6 +265,25 @@ def test_jump_outside_the_path_is_rejected(profiles):
                  seed=1)
 
 
+def test_runs_end_in_the_past_so_backtesters_can_replay_them(profiles):
+    """Found by actually running LEAN: timestamps used to start at a hardcoded
+    2026-01-01, so any run longer than the elapsed year landed in the future and
+    the backtester silently replayed only the part before today — a 500-bar export
+    ran 227 bars and skipped the injected crash entirely."""
+    p = profiles["eurusd"]
+    today = pd.Timestamp.now("UTC").normalize().tz_localize(None)
+    bars = simulate(p, 2000, seed=1, start_price=p.last_close)
+    assert pd.DatetimeIndex(bars["timestamp"]).max() <= today
+    assert pd.DatetimeIndex(bars["timestamp"]).min() < today  # a real span, not all one day
+
+
+def test_end_date_is_explicit_when_given(profiles):
+    p = profiles["eurusd"]
+    bars = simulate(p, 100, seed=1, end_date="2020-06-30", start_price=p.last_close)
+    assert pd.DatetimeIndex(bars["timestamp"]).max() == pd.Timestamp("2020-06-30")
+    assert len(bars) == 100
+
+
 def test_exports_are_reproducible_from_the_manifest(profiles):
     """Same seed + scenario + profile => byte-identical payload. This is the whole
     point of the manifest."""
