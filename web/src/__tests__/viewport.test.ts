@@ -59,3 +59,13 @@ describe("viewport", () => {
     expect(new Set(ticks.map((t) => t.toPrecision(3))).size).toBe(ticks.length);
   });
 });
+
+import { followOffset } from "../engine/viewport";
+
+describe("followOffset", () => {
+  it("keeps the tail at 85% of the span and clamps at zero for short sessions", () => {
+    expect(followOffset(1000, 100)).toBe(1000 - 85);
+    expect(followOffset(50, 100)).toBe(0);
+    expect(followOffset(85, 100)).toBe(0);
+  });
+});

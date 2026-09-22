@@ -31,6 +31,11 @@ export function panBy(vp: Viewport, dxPx: number, widthPx: number, n: number): V
   return { ...vp, offset: offset };
 }
 
+/** Live follow: offset that keeps the session tail at `fill` of the visible span. */
+export function followOffset(n: number, spanCandles: number, fill = 0.85): number {
+  return Math.max(0, n - spanCandles * fill);
+}
+
 export interface VisibleRange {
   first: number;
   last: number;

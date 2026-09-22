@@ -217,3 +217,51 @@ Cross-session memory: what's done, decisions made, current state. Append a dated
 - Live-verified: explicit + default anchors both → 1.148369; no-store header present. 59 pytest / 12 vitest green.
 
 **Runbook reminder**: before UI testing, `pkill -f "uvicorn app:app"` then start exactly one server; toolbar must read `engine 0.2.0`.
+
+## Session 13 — 2026-09-18 — Phase 4 (begun): the visual motor
+
+**Done**
+- Engine: `simulate_ticks` tick stream now carries a per-tick `state` column (regime heatmap data, one code path preserved).
+- API: `WS /ws/simulate` — streams `bar_open → ticks → bar_close` per candle + `done`; generation in threadpool (off event loop), per-tick asyncio pacing (`ticks_per_sec`, 0 = unthrottled), scenario params, anchored to `last_close`. Gotcha fixed: StaticFiles mount moved AFTER the WS route (mount-at-"/" had shadowed it).
+- Web: `engine/live.ts` pure event reducer (bar_open/tick/bar_close/done/error; late ticks ignored; close envelope covers forming wick) + heatmap colors; renderer draws regime heat columns (calm blue / turbulent red) and the forming candle at 70% alpha; store `live`+`follow` (auto-tail until user pans); App `▶ live` toggle (400-candle session @ 250 ticks/s) with progress status.
+- Tests: 62 pytest (2 new WS e2e: full-session message counts, deterministic forced-regime) / 17 vitest (5 live-reducer). Live e2e smoke: real ws client, 20 bars × 24 ticks streamed in order.
+
+**Phase 4 gate status**: stream + animation logic verified headlessly; *smoothness* of a full session is the browser check (`▶ live`). Remaining Phase 4 scope: volume-profile overlay (price-level histogram), crosshair; Phase 5: exports + workflow.
+
+## Session 14 — 2026-09-18 — Phase 4 fixes + completion (user-reported)
+
+**Fixed**
+- Opening glitch (root cause): stale-response race — the default-asset simulation resolved AFTER the profile list auto-selected the first asset and flipped the market back. `setBars` now drops responses for non-current assets; the simulate effect reads `last_close` via ref (profile arrival no longer re-triggers it → no double simulation on open); initial viewport matches the first-data zoom (no snap).
+- Live-mode zoom: wheel-zoom no longer fights the auto-follow (only pan/zoom-out... only PAN hands control to the user; `reset view` resumes following).
+
+**Completed Phase 4 scope**
+- Volume-profile overlay: `volumeProfile()` (pure, log-price bins, candle volume spread across its range, total conserved — vitested) drawn as a right-aligned histogram strip.
+- Crosshair: dashed lines, live price tag on the axis, hovered-candle OHLC readout; computed in Chart, drawn by the renderer.
+- 21 vitest / 62 pytest green; live-stream smoke re-verified (10 bars × 12 ticks, in order).
+
+**Phase 4 status: feature-complete per brief** (intra-candle animation ✓, WS streaming in non-blocking chunks ✓, volume profile ✓, regime heatmap ✓). Gate = user watches a full session; then commit Phase 4. Next: Phase 5 (exports CSV/Parquet LEAN-compatible, three-step workflow, reproducibility controls, scenario presets).
+
+## Session 15 — 2026-09-22 — Phase 4 audit + fixes, committed
+
+Full review of the uncommitted Phase 3→4 delta before committing it. Nine defects found and fixed.
+
+**Correctness**
+- **Crosshair died once panned.** The renderer guarded with `crosshair.index < layout.visible.length` — an *absolute* bar index compared against a *window length*. Past the first screenful the crosshair silently stopped drawing. Now converted to window-relative (`index - geoms[0].index`) before the bounds check; empty-layout case covered.
+- **Double simulation on `■ stop`.** `stopLive()` called `simulate()` explicitly *and* cleared `live`, which re-fired the simulate effect — two identical requests. Same shape as the Session 14 opening glitch; the explicit call is gone, the effect owns the refetch.
+- **Heatmap states were re-derived from a second RNG** (`np.random.default_rng(seed)` + `scenario_states`) — correct only by accident, because `scenario_states` happens to be the first rng consumer inside `simulate_ticks`. Any reordering of draws there would have desynced the regime colors from the bars with no test failing. States now come from `ticks["state"]`: one code path, as intended when that column was added.
+- **`candles.test.ts` forming-candle assertion was wrong** (not the code): it computed the expected max as `without.maxPrice * 101/500`, assuming `without.maxPrice` was the raw spike high of 500 — it is padded by `PRICE_PAD` to 524.06. Now asserted against the padded bounds directly.
+
+**Performance**
+- **App re-rendered at tick rate.** `useStore()` with no selector subscribes to the whole store, so every tick (and every pointer move, and every pan) re-rendered App and re-ran the simulate effect — defeating Session 10's "draw reads the store imperatively" fix one level up. Per-field selectors now; App re-renders once per `bar_close`, not ~250×/s.
+- **O(n²) tick lookup in the WS loop**: `ticks[ticks["bar_id"] == t]` re-scanned the whole frame once per bar. Single `searchsorted` pass — same class of bug as the Session 10 renderer `indexOf`.
+- **Tick pacing drifted**: a flat `sleep(1/rate)` per tick meant the real rate was rate-minus-send-time. Deadline-based pacer (falls back to catch-up, never banks a debt); measured 196/200 and 474/500 ticks/s against a live server.
+
+**Hardening**
+- **WS stream had no size caps** while `POST /simulate` capped at 10k candles / 200 ticks. Both endpoints now share `MAX_SIM_CANDLES` / `MAX_TICKS_PER_CANDLE`, rejected with an `error` event before any generation happens.
+- Error path could raise *again* on an already-closed socket (swallowing the original error); WS imports were sitting mid-file — both cleaned up.
+
+**Verification**: 67 pytest (+5) / 27 vitest (+4, incl. new `renderer.test.ts` driven by a recording canvas stub); `tsc --noEmit` + `vite build` clean. E2E against a live uvicorn with a real ws client: caps rejected, unknown asset 404s cleanly, tick ordering correct, WS heatmap states match the engine's own stream, anchor 1.148369 preserved, single-port serving + `no-store` intact.
+
+**Still the user's gate** (no browser automation in this environment): watch a full live session for smoothness, crosshair behavior while panned, and the 60fps check via `?bench=1`.
+
+**Next**: Phase 5 — exports (CSV/Parquet, LEAN-compatible), three-step workflow, reproducibility controls, scenario presets.

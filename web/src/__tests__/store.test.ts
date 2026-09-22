@@ -30,3 +30,38 @@ describe("store", () => {
     expect(useStore.getState().viewport.offset).toBe(0);
   });
 });
+
+describe("store hardening", () => {
+  beforeEach(() => {
+    useStore.setState({ asset: "eurusd", bars: [], live: null, follow: true });
+  });
+
+  it("drops stale setBars from a previously selected asset (opening glitch)", () => {
+    const s = useStore.getState();
+    s.setAsset("xauusd");
+    useStore.getState().setBars([candle, candle], "eurusd"); // late eurusd response
+    expect(useStore.getState().asset).toBe("xauusd");
+    expect(useStore.getState().bars).toEqual([]);
+  });
+
+  it("stopLive clears the session so the static refetch has nothing stale to flash", () => {
+    const s = useStore.getState();
+    s.startLive();
+    useStore.getState().applyWsEvent({ type: "bar_open", bar_id: 0, open: 1, state: 0 });
+    useStore.getState().stopLive();
+    expect(useStore.getState().live).toBeNull();
+    expect(useStore.getState().bars).toEqual([]);
+  });
+
+  it("zoom keeps live-follow; pan and reset hand control back", () => {
+    const s = useStore.getState();
+    s.startLive();
+    useStore.getState().zoomAtPx(100, 1.2);
+    expect(useStore.getState().follow).toBe(true);
+    useStore.getState().panByPx(10, 800);
+    expect(useStore.getState().follow).toBe(false);
+    useStore.getState().resetView();
+    expect(useStore.getState().follow).toBe(true);
+    useStore.getState().stopLive();
+  });
+});

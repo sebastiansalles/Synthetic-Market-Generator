@@ -116,6 +116,8 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
          "tick_in_bar": np.concatenate(tick_idx),
          "price": np.concatenate(tick_prices)}
     )
+    if tick_ids:
+        ticks["state"] = states[np.concatenate(tick_ids)]
     return bars, ticks
 
 

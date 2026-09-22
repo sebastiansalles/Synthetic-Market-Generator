@@ -197,3 +197,95 @@ def test_html_entry_point_is_not_cached():
         pytest.skip("web/dist not built")
     resp = client.get("/")
     assert resp.headers.get("cache-control") == "no-store"
+
+
+def _read_session(params: str):
+    with client.websocket_connect(f"/ws/simulate?{params}") as ws:
+        opens = closes = ticks = generating = 0
+        open_states = []
+        while True:
+            msg = ws.receive_json()
+            if msg["type"] == "generating":
+                generating += 1
+            elif msg["type"] == "bar_open":
+                opens += 1
+                open_states.append(msg["state"])
+            elif msg["type"] == "tick":
+                ticks += 1
+                assert np.isfinite(msg["price"])
+            elif msg["type"] == "bar_close":
+                closes += 1
+            elif msg["type"] == "done":
+                break
+            else:
+                raise AssertionError(f"unexpected message: {msg}")
+    return opens, closes, ticks, open_states, generating
+
+
+def test_websocket_streams_full_session():
+    opens, closes, ticks, open_states, generating = _read_session(
+        "asset=eurusd&seed=3&n_candles=5&ticks_per_candle=4&ticks_per_sec=0")
+    assert opens == closes == 5
+    assert ticks == 20
+    assert set(open_states) <= {0, 1}
+    assert generating == 1  # sent before off-loop generation starts
+
+
+def test_websocket_scenario_forces_opening_regime():
+    _, _, _, open_states, _ = _read_session(
+        "asset=eurusd&seed=3&n_candles=5&ticks_per_candle=1&ticks_per_sec=0"
+        "&force_state=1&force_n=3")
+    assert open_states[:3] == [1, 1, 1]  # deterministic forced stretch
+
+
+@pytest.mark.parametrize(
+    "params, expected",
+    [("n_candles=0", "n_candles"),
+     ("n_candles=10001", "n_candles"),
+     ("n_candles=5&ticks_per_candle=0", "ticks_per_candle"),
+     ("n_candles=5&ticks_per_candle=201", "ticks_per_candle")],
+)
+def test_websocket_rejects_out_of_range_session_size(params, expected):
+    """The WS stream honours the same caps as POST /simulate — an unbounded
+    n_candles would let one client generate an arbitrarily large session."""
+    with client.websocket_connect(f"/ws/simulate?asset=eurusd&ticks_per_sec=0&{params}") as ws:
+        msg = ws.receive_json()
+    assert msg["type"] == "error"
+    assert expected in msg["message"]
+
+
+def test_websocket_states_match_the_simulated_tick_stream():
+    """Regime heat must come from the same path as the bars. The endpoint used to
+    re-derive states from a second RNG, which silently desyncs if simulate_ticks
+    ever reorders its draws."""
+    from synthetic.profile_store import DEFAULT_PROFILE_DIR, load_profile
+    from synthetic.simulate import simulate_ticks
+
+    profile = load_profile(DEFAULT_PROFILE_DIR / "eurusd.pkl")
+    _, ticks = simulate_ticks(profile, 12, seed=7, ticks_per_candle=3,
+                              start_price=profile.last_close)
+    expected = ticks.groupby("bar_id")["state"].first().tolist()
+
+    _, _, _, open_states, _ = _read_session(
+        "asset=eurusd&seed=7&n_candles=12&ticks_per_candle=3&ticks_per_sec=0")
+    assert open_states == expected
+
+
+def test_tick_stream_carries_state_for_heatmap():
+    from synthetic.simulate import simulate_ticks
+
+    df = pd.read_parquet(
+        __import__("synthetic.data", fromlist=["smg_data"]).DEFAULT_PROCESSED_DIR / "xauusd_1d.parquet"
+    )
+    from synthetic.calibration import calibrate
+
+    profile = calibrate(df, asset="xauusd", seed=0)
+    _, ticks = simulate_ticks(profile, 50, seed=1, ticks_per_candle=8)
+
+    assert "state" in ticks.columns
+    assert set(ticks["state"].unique()) <= set(range(profile.hmm.n_states))
+    # one regime per bar: the heatmap column is constant within a bar
+    for bar_id in ticks["bar_id"].unique():
+        assert ticks.loc[ticks.bar_id == bar_id, "state"].nunique() == 1
+    # every tick annotated: bar count x ticks_per_candle rows
+    assert len(ticks) == 50 * 8

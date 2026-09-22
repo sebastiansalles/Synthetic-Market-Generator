@@ -7,12 +7,14 @@ simulator. Phase 4 adds the WebSocket tick stream on top of synthetic.simulate.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,13 +24,14 @@ from synthetic.calibration import AssetProfile, calibrate
 from synthetic.data import DEFAULT_PROCESSED_DIR
 from synthetic.profile_store import DEFAULT_PROFILE_DIR, load_profile, save_profile
 from synthetic.registry import REGISTRY
-from synthetic.simulate import Scenario, simulate
+from synthetic.simulate import Scenario, simulate, simulate_ticks
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 app = FastAPI(title="Synthetic Market Generator", version="0.2.0")
 
 MAX_SIM_CANDLES = 10_000  # JSON responses stay snappy; large exports are Phase 5
+MAX_TICKS_PER_CANDLE = 200
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("SMG_CORS_ORIGINS", "*").split(",")]
 app.add_middleware(
@@ -153,7 +156,7 @@ class SimulateIn(BaseModel):
     asset: str
     n_candles: int = Field(default=500, ge=1, le=MAX_SIM_CANDLES)
     seed: int = 0
-    ticks_per_candle: int = Field(default=24, ge=1, le=200)
+    ticks_per_candle: int = Field(default=24, ge=1, le=MAX_TICKS_PER_CANDLE)
     start_price: float | None = Field(default=None)  # default: the asset's last real close
     scenario: ScenarioIn | None = None
 
@@ -186,6 +189,81 @@ def recalibrate(asset: str, seed: int = Query(default=0)) -> dict:
     path = save_profile(profile, DEFAULT_PROFILE_DIR / f"{asset}.pkl")
     _profile_cache[asset] = (path.stat().st_mtime, profile)
     return {"status": "recalibrated", "profile": profile_summary(profile)}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: live tick stream (one code path: events come from simulate_ticks)
+# ---------------------------------------------------------------------------
+
+
+@app.websocket("/ws/simulate")
+async def ws_simulate(
+    ws: WebSocket,
+    asset: str,
+    seed: int = 0,
+    n_candles: int = 300,
+    ticks_per_candle: int = 24,
+    ticks_per_sec: float = 250.0,
+    force_state: int | None = None,
+    force_n: int = 60,
+) -> None:
+    """Stream a full simulated session tick-by-tick: bar_open -> ticks -> bar_close
+    per candle, closing with `done`. Generation runs off the event loop; pacing is
+    deadline-based (0 ticks_per_sec = as fast as possible, for tests)."""
+    await ws.accept()
+    try:
+        if not 1 <= n_candles <= MAX_SIM_CANDLES:
+            raise ValueError(f"n_candles must be in [1, {MAX_SIM_CANDLES}]")
+        if not 1 <= ticks_per_candle <= MAX_TICKS_PER_CANDLE:
+            raise ValueError(f"ticks_per_candle must be in [1, {MAX_TICKS_PER_CANDLE}]")
+        profile = _get_profile(asset)
+        scenario = Scenario(force_state, force_n) if force_state is not None else None
+        await ws.send_json({"type": "generating", "n_candles": n_candles})  # session builds off-loop
+        loop = asyncio.get_running_loop()
+        bars, ticks = await loop.run_in_executor(
+            None,
+            lambda: simulate_ticks(
+                profile, n_candles, seed=seed, scenario=scenario,
+                ticks_per_candle=ticks_per_candle, start_price=profile.last_close,
+            ),
+        )
+        # Regimes come from the tick stream itself — re-deriving them from a second
+        # RNG would silently desync the heatmap if simulate_ticks ever reorders draws.
+        bar_ids = ticks["bar_id"].to_numpy()
+        prices = ticks["price"].to_numpy(dtype=float)
+        tick_states = ticks["state"].to_numpy()
+        starts = np.searchsorted(bar_ids, np.arange(n_candles), side="left")
+        ends = np.searchsorted(bar_ids, np.arange(n_candles), side="right")
+
+        delay = 1.0 / ticks_per_sec if ticks_per_sec > 0 else 0.0
+        deadline = time.perf_counter()
+        cols = bars.to_dict(orient="records")
+        for t in range(n_candles):
+            bar = cols[t]
+            state = int(tick_states[starts[t]])
+            await ws.send_json({"type": "bar_open", "bar_id": t, "open": bar["open"],
+                                "state": state})
+            for price in prices[starts[t]:ends[t]]:
+                await ws.send_json({"type": "tick", "bar_id": t, "price": float(price)})
+                if delay:
+                    # pace against a moving deadline so send time doesn't compound
+                    deadline += delay
+                    ahead = deadline - time.perf_counter()
+                    if ahead > 0:
+                        await asyncio.sleep(ahead)
+                    else:
+                        deadline = time.perf_counter()  # fell behind: don't bank a debt
+            await ws.send_json({"type": "bar_close", "bar_id": t, "high": bar["high"],
+                                "low": bar["low"], "close": bar["close"],
+                                "volume": bar["volume"], "state": state})
+        await ws.send_json({"type": "done", "n_candles": n_candles})
+    except WebSocketDisconnect:
+        return  # client navigated away mid-session: nothing to clean up
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        except (WebSocketDisconnect, RuntimeError):
+            return  # socket already gone: the original error has nowhere to go
 
 
 # Single-port serving: the built frontend, served by the same process (mounted

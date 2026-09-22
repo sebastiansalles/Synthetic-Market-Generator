@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
-import { layoutCandles } from "../engine/candles";
+import { layoutCandles, volumeProfile } from "../engine/candles";
 import { drawChart } from "../engine/renderer";
+import { followOffset, priceToY } from "../engine/viewport";
 import { useStore } from "../store";
 
 const AXIS_WIDTH = 64;
@@ -20,8 +21,27 @@ export function Chart() {
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const { bars, viewport } = useStore.getState();
-    if (bars.length === 0) return;
+    const { bars, viewport, live } = useStore.getState();
+    // live mode displays completed bars + the forming candle; static mode the fetched set
+    const display =
+      live !== null
+        ? [
+            ...live.bars,
+            ...(live.forming
+              ? [
+                  {
+                    timestamp: "",
+                    open: live.forming.open,
+                    high: live.forming.high,
+                    low: live.forming.low,
+                    close: live.forming.close,
+                    volume: 0,
+                  },
+                ]
+              : []),
+          ]
+        : bars;
+    if (display.length === 0) return;
     const dpr = window.devicePixelRatio || 1;
     const cssW = canvas.clientWidth;
     const cssH = canvas.clientHeight;
@@ -33,8 +53,41 @@ export function Chart() {
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const priceHeight = cssH - VOLUME_PANE;
-    const layout = layoutCandles(bars, viewport, cssW - AXIS_WIDTH, priceHeight);
-    drawChart(ctx, layout, { width: cssW, height: cssH, priceHeight, axisWidth: AXIS_WIDTH });
+    // live: scale from COMPLETED bars so a forming wick can't jitter the whole axis
+    const layout = layoutCandles(
+      display,
+      viewport,
+      cssW - AXIS_WIDTH,
+      priceHeight,
+      live && live.bars.length >= 2 ? live.bars : undefined,
+    );
+    const { crosshair } = useStore.getState();
+    const crossInfo =
+      crosshair && cssW - AXIS_WIDTH > 0
+        ? {
+            px: crosshair.px,
+            py: crosshair.py,
+            index: Math.min(
+              display.length - 1,
+              Math.max(0, Math.floor(viewport.offset + crosshair.px * viewport.candlesPerPixel)),
+            ),
+            price:
+              layout.minPrice +
+              (1 - crosshair.py / priceHeight) * (layout.maxPrice - layout.minPrice),
+          }
+        : undefined;
+    const profile = volumeProfile(layout.visible)
+      .map((b) => ({ ...b, y: priceToY(Math.exp(b.center), layout.minPrice, layout.maxPrice, priceHeight) }))
+      .filter((b) => b.y >= 0 && b.y <= priceHeight);
+    drawChart(
+      ctx,
+      layout,
+      { width: cssW, height: cssH, priceHeight, axisWidth: AXIS_WIDTH },
+      undefined,
+      live ? { states: live.states, formingIndex: live.forming ? display.length - 1 : null } : undefined,
+      profile,
+      crossInfo,
+    );
   }, []);
 
   const scheduleDraw = useCallback(() => {
@@ -77,6 +130,21 @@ export function Chart() {
     return () => clearInterval(id);
   }, [bench]);
 
+  // live mode: follow the growing tail until the user takes over the viewport
+  const live = useStore((s) => s.live);
+  useEffect(() => {
+    if (!live || live.bars.length === 0) return;
+    const s = useStore.getState();
+    if (!s.follow) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const span = (canvas.clientWidth - AXIS_WIDTH) * s.viewport.candlesPerPixel;
+    const target = followOffset(live.bars.length, span);
+    if (Math.abs(s.viewport.offset - target) > 0.5) {
+      useStore.setState({ viewport: { ...s.viewport, offset: target } });
+    }
+  }, [live]);
+
   return (
     <div className="chart-wrap">
       <canvas
@@ -105,12 +173,19 @@ export function Chart() {
           dragRef.current = { x: e.clientX };
         }}
         onPointerMove={(e) => {
-          if (!dragRef.current) return;
-          const dx = e.clientX - dragRef.current.x;
-          dragRef.current.x = e.clientX;
-          useStore.getState().panByPx(dx, e.currentTarget.clientWidth - AXIS_WIDTH);
+          const rect = e.currentTarget.getBoundingClientRect();
+          if (dragRef.current) {
+            const dx = e.clientX - dragRef.current.x;
+            dragRef.current.x = e.clientX;
+            useStore.getState().panByPx(dx, e.currentTarget.clientWidth - AXIS_WIDTH);
+          }
+          useStore.getState().setCrosshair({ px: e.clientX - rect.left, py: e.clientY - rect.top });
         }}
         onPointerUp={() => (dragRef.current = null)}
+        onPointerLeave={() => {
+          dragRef.current = null;
+          useStore.getState().setCrosshair(null);
+        }}
         onDoubleClick={() => useStore.getState().resetView()}
       />
       {bench && <div ref={fpsRef} className="fps" />}
