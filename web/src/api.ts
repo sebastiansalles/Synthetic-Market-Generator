@@ -24,6 +24,25 @@ export interface ProfileSummary {
   expected_dwell_days: number[];
   volume_mode: string;
   last_close: number;
+  last_date: string | null;
+  periods_per_year: number;
+  drift_ann: number;
+  drift_ann_se: number;
+}
+
+/** What a run of `nCandles` bars actually means for this asset. Bar counts hide the
+ *  calendar: 1500 bars is 4.1 years of 365-day crypto but 6.0 years of business days,
+ *  and price dispersion grows with the square root of that span. */
+export function horizon(p: ProfileSummary, nCandles: number) {
+  const years = nCandles / p.periods_per_year;
+  const sdLogPrice = p.annual_vol * Math.sqrt(years);
+  return {
+    years,
+    sdLogPrice,
+    // central 90% of terminal price, as a multiple of the starting level
+    lowMultiple: Math.exp(-1.645 * sdLogPrice),
+    highMultiple: Math.exp(1.645 * sdLogPrice),
+  };
 }
 
 export function listProfiles(): Promise<Record<string, ProfileSummary>> {
@@ -56,6 +75,7 @@ export interface RunSpec {
   resolution: string;
   preset: string;
   startPrice?: number;
+  driftAnnual?: number | null; // null/undefined = the profile's calibrated drift
 }
 
 function runBody(run: RunSpec) {
@@ -68,6 +88,7 @@ function runBody(run: RunSpec) {
     // explicit anchor: the frontend dictates the start price so a stale
     // server-side pickle can't silently break the reference
     start_price: run.startPrice ?? null,
+    drift_annual: run.driftAnnual ?? null,
   };
 }
 

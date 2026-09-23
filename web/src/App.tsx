@@ -25,6 +25,7 @@ export function App() {
   const nCandles = useStore((s) => s.nCandles);
   const resolution = useStore((s) => s.resolution);
   const preset = useStore((s) => s.preset);
+  const driftAnnual = useStore((s) => s.driftAnnual);
   const status = useStore((s) => s.status);
   const hasBars = useStore((s) => s.bars.length > 0);
   const isLive = useStore((s) => s.live !== null);
@@ -65,6 +66,7 @@ export function App() {
       resolution,
       preset,
       startPrice: profilesRef.current[asset]?.last_close,
+      driftAnnual,
     })
       .then((b) => {
         setBars(b, asset);
@@ -72,7 +74,7 @@ export function App() {
         setStatus(`${b.length} ${resolution} candles · seed ${seed}${scope}`);
       })
       .catch((e) => setStatus(`simulation failed: ${e.message}`));
-  }, [asset, nCandles, seed, resolution, preset, isLive, setBars, setStatus]);
+  }, [asset, nCandles, seed, resolution, preset, driftAnnual, isLive, setBars, setStatus]);
 
   const startLive = () => {
     const s = useStore.getState();

@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from synthetic.calibration import AssetProfile, calibrate
+from synthetic.calibration import AssetProfile, calibrate, calibrated_drift
 from synthetic.data import DEFAULT_PROCESSED_DIR
 from synthetic.export import RESOLUTIONS, ExportManifest, aggregate_bars, export_bytes
 from synthetic.profile_store import DEFAULT_PROFILE_DIR, load_profile, save_profile
@@ -122,6 +122,10 @@ def profile_summary(p: AssetProfile) -> dict:
         "volume_mode": "modeled" if (p.volume and p.volume.enabled) else "zeros (no centralized tape)",
         "last_close": _f(getattr(p, "last_close", 100.0)),
         "last_date": getattr(p, "last_date", None),
+        "drift_ann": _f(calibrated_drift(p) * p.periods_per_year),
+        # se(mu) ~ sigma/sqrt(T): drift is the least identified parameter in the model
+        "drift_ann_se": _f(p.targets["vol"] * np.sqrt(p.periods_per_year)
+                           / np.sqrt(p.n_bars / p.periods_per_year)),
     }
 
 
@@ -178,6 +182,7 @@ class SimulateIn(BaseModel):
     resolution: str = "daily"  # the chart shows exactly what /export would write
     end_date: str | None = None
     start_date: str | None = None  # default: the bar after the profile's last real one
+    drift_annual: float | None = None  # None = calibrated; 0 neutralizes the trend
 
 
 def _resolve_scenario(body: SimulateIn | ExportIn, profile: AssetProfile) -> Scenario | None:
@@ -225,7 +230,8 @@ def simulate_endpoint(body: SimulateIn) -> dict:
             start_date = _forward_start(profile)
         bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
                         ticks_per_candle=body.ticks_per_candle, start_price=start_price,
-                        end_date=body.end_date, start_date=start_date)
+                        end_date=body.end_date, start_date=start_date,
+                        drift_annual=body.drift_annual)
         bars = aggregate_bars(bars, body.resolution)
     except ValueError as exc:  # e.g. a jump placed outside the path, or a bad resolution
         raise HTTPException(422, str(exc))
@@ -245,6 +251,7 @@ class ExportIn(BaseModel):
     scenario: ScenarioIn | None = None
     preset: str | None = None
     end_date: str | None = None
+    drift_annual: float | None = None
 
 
 _MEDIA_TYPES = {"csv": "text/csv", "parquet": "application/vnd.apache.parquet",
@@ -263,12 +270,14 @@ def export_endpoint(body: ExportIn) -> Response:
     scenario = _resolve_scenario(body, profile)
     try:
         bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
-                        start_price=start_price, end_date=body.end_date)
+                        start_price=start_price, end_date=body.end_date,
+                        drift_annual=body.drift_annual)
         bars = aggregate_bars(bars, body.resolution)
         manifest = ExportManifest(
             asset=body.asset, seed=body.seed, n_candles=body.n_candles,
             resolution=body.resolution, start_price=float(start_price),
             scenario=(asdict(scenario) if scenario else None),
+            drift_annual=body.drift_annual,
         )
         payload, filename = export_bytes(bars, body.asset, body.fmt, body.resolution, manifest)
     except ValueError as exc:  # unknown format/resolution/preset, or a bad jump index

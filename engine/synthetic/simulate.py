@@ -18,9 +18,11 @@ import pandas as pd
 
 from synthetic.calibration import (
     AssetProfile,
+    calibrated_drift,
     conditional_returns,
     log_returns,
     scrub_returns,
+    shift_state_drift,
     simulate_regimes,
 )
 from synthetic.data import OHLCV_COLUMNS, validate_ohlcv
@@ -106,6 +108,13 @@ def build_scenario(preset: str, n_candles: int, profile: AssetProfile) -> Scenar
     )
 
 
+def _drift_override(profile: AssetProfile, drift_annual: float | None) -> np.ndarray | None:
+    """Per-state mu for a requested long-run annual drift; None keeps the calibrated one."""
+    if drift_annual is None:
+        return None
+    return shift_state_drift(profile, drift_annual / profile.periods_per_year)
+
+
 def scenario_states(profile: AssetProfile, n: int, scenario: Scenario | None, rng) -> np.ndarray:
     """Regime path, with optional forced stretch at the beginning."""
     states = simulate_regimes(profile.hmm, n, rng)
@@ -154,7 +163,7 @@ def _daily_timestamps(profile: AssetProfile, n: int,
 def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
                    scenario: Scenario | None = None, ticks_per_candle: int = 24,
                    start_price: float = 100.0, end_date: str | None = None,
-                   start_date: str | None = None,
+                   start_date: str | None = None, drift_annual: float | None = None,
                    return_ticks: bool = True) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     """Simulate a full path. Returns (bars, ticks): bars is a validated OHLCV frame
     (one row per candle); ticks — None unless return_ticks — carries the intra-candle
@@ -163,7 +172,8 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
     rng = np.random.default_rng(seed)
     states = scenario_states(profile, n_candles, scenario, rng)
     jumps = scenario.jump_path(n_candles) if scenario else None
-    returns, h = conditional_returns(profile, states, rng, jumps=jumps)
+    mu_states = _drift_override(profile, drift_annual)
+    returns, h = conditional_returns(profile, states, rng, jumps=jumps, mu_states=mu_states)
     volumes = simulate_volume(profile.volume, returns, states, profile.hmm.state_vol, rng)
     timestamps = _daily_timestamps(profile, n_candles, end_date, start_date)
     # Intrabar increments use the SAME per-state Student-t innovation family as the
@@ -219,19 +229,20 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
 def simulate(profile: AssetProfile, n_candles: int, scenario: Scenario | None = None,
              seed: int = 0, ticks_per_candle: int = 24, start_price: float = 100.0,
              end_date: str | None = None, start_date: str | None = None,
-             debug: bool = False):
+             drift_annual: float | None = None, debug: bool = False):
     """simulate(profile, n_candles, scenario?) -> OHLCV[] (validated). Seeded and
     reproducible; pass debug=True to also get the latent state/return/vol paths."""
     bars, _ = simulate_ticks(profile, n_candles, seed=seed, scenario=scenario,
                              ticks_per_candle=ticks_per_candle, start_price=start_price,
                              end_date=end_date, start_date=start_date,
-                             return_ticks=False)
+                             drift_annual=drift_annual, return_ticks=False)
     if not debug:
         return bars
     rng = np.random.default_rng(seed)
     states = scenario_states(profile, n_candles, scenario, rng)
     jumps = scenario.jump_path(n_candles) if scenario else None
-    returns, h = conditional_returns(profile, states, rng, jumps=jumps)
+    returns, h = conditional_returns(profile, states, rng, jumps=jumps,
+                                     mu_states=_drift_override(profile, drift_annual))
     return bars, {"states": states, "returns": returns, "h": h}
 
 

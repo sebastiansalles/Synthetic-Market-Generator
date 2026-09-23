@@ -1,5 +1,36 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { exportRun, RunSpec, simulate } from "../api";
+import { exportRun, horizon, ProfileSummary, RunSpec, simulate } from "../api";
+
+const BTC = {
+  periods_per_year: 365,
+  annual_vol: 0.657,
+} as ProfileSummary;
+
+const EUR = {
+  periods_per_year: 252,
+  annual_vol: 0.09,
+} as ProfileSummary;
+
+describe("horizon", () => {
+  // a bar count hides the calendar, which is what made BTC's dispersion surprising
+  it("converts bars to years using the asset's own calendar", () => {
+    expect(horizon(BTC, 1500).years).toBeCloseTo(4.11, 2);
+    expect(horizon(EUR, 1500).years).toBeCloseTo(5.95, 2);
+  });
+
+  it("reports dispersion growing with the square root of the span", () => {
+    const short = horizon(BTC, 365);
+    const long = horizon(BTC, 365 * 4);
+    expect(long.sdLogPrice / short.sdLogPrice).toBeCloseTo(2, 6);
+  });
+
+  it("brackets the terminal price symmetrically in log space", () => {
+    const h = horizon(BTC, 1500);
+    expect(h.lowMultiple * h.highMultiple).toBeCloseTo(1, 9);
+    expect(h.highMultiple).toBeGreaterThan(8); // BTC really is this wide over 4 years
+    expect(horizon(EUR, 1500).highMultiple).toBeLessThan(1.5); // and EUR/USD is not
+  });
+});
 
 const RUN: RunSpec = {
   asset: "eurusd",
@@ -30,7 +61,14 @@ describe("run spec serialization", () => {
       resolution: "weekly",
       preset: "flash_crash",
       start_price: 1.1484,
+      drift_annual: null, // null = the profile's calibrated drift
     });
+  });
+
+  it("sends an explicit zero drift rather than dropping it", async () => {
+    const fetchMock = mockFetch({ json: async () => ({ bars: [] }) });
+    await simulate({ ...RUN, driftAnnual: 0 });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).drift_annual).toBe(0);
   });
 
   it("sends the 'standard' preset as null — the API treats absence as unforced", async () => {

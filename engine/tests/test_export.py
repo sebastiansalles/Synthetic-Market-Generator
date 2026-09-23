@@ -308,6 +308,57 @@ def test_end_date_is_explicit_when_given(profiles):
     assert len(bars) == 100
 
 
+def test_drift_override_moves_the_level_but_not_the_dynamics(profiles):
+    """Drift is the least identified parameter in the model (BTC: ~46%/yr with a
+    standard error near 19pp) yet it compounds over years. Neutralizing it must not
+    disturb volatility or clustering — only the trend."""
+    p = profiles["btcusd"]
+    ppy = p.periods_per_year
+
+    from synthetic.calibration import calibrated_drift
+
+    # Tested as a PAIRED difference. The same seed draws the same regime path and the
+    # same innovations, and the drift shift is uniform across states, so the two runs
+    # differ by exactly the drift and nothing else. Comparing the runs' means
+    # separately would drown in noise: at BTC's volatility the standard error of a
+    # drift estimate over 800 bars is ~49%/yr per path — which is precisely why this
+    # control exists.
+    def run(drift, seed):
+        b = simulate(p, 800, seed=seed, start_price=p.last_close, drift_annual=drift)
+        return np.log(b["close"].to_numpy()[1:] / b["close"].to_numpy()[:-1])
+
+    expected = calibrated_drift(p) * ppy
+    assert expected > 0.15  # the calibrated drift is materially positive
+
+    for seed in (401, 402, 403):
+        r_cal, r_zero = run(None, seed), run(0.0, seed)
+        assert (r_cal.mean() - r_zero.mean()) * ppy == pytest.approx(expected, rel=1e-6)
+        # only the level moved: the innovations are bit-identical
+        assert np.allclose(r_cal - r_cal.mean(), r_zero - r_zero.mean())
+        assert r_zero.std() == pytest.approx(r_cal.std(), rel=1e-9)
+
+
+def test_drift_shift_preserves_the_regime_spread(profiles):
+    """Shifting, not overwriting: turbulent regimes keep their characteristically
+    lower mean relative to calm ones."""
+    from synthetic.calibration import calibrated_drift, shift_state_drift
+
+    p = profiles["eurusd"]
+    original = np.array([g["mu"] for g in p.state_garch])
+    shifted = shift_state_drift(p, 0.0)
+    assert np.allclose(np.diff(shifted), np.diff(original))  # spread preserved
+    assert float(np.dot(p.hmm.stationary, shifted)) == pytest.approx(0.0, abs=1e-12)
+    assert calibrated_drift(p) == pytest.approx(float(np.dot(p.hmm.stationary, original)))
+
+
+def test_stationary_distribution_is_a_valid_distribution(profiles):
+    for p in profiles.values():
+        pi = p.hmm.stationary
+        assert pi.sum() == pytest.approx(1.0)
+        assert (pi > 0).all()
+        assert np.allclose(pi @ p.hmm.transition, pi)  # invariant under the chain
+
+
 def test_exports_are_reproducible_from_the_manifest(profiles):
     """Same seed + scenario + profile => byte-identical payload. This is the whole
     point of the manifest."""

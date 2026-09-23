@@ -1,6 +1,9 @@
 import { useState } from "react";
-import { exportRun, ProfileSummary, RunSpec, WorkflowOptions } from "../api";
+import { exportRun, horizon, ProfileSummary, RunSpec, WorkflowOptions } from "../api";
 import { useStore } from "../store";
+
+const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
+const mult = (x: number) => (x >= 10 ? `${x.toFixed(0)}x` : `${x.toFixed(2)}x`);
 
 /** Phase 5's three-step workflow: pick a market, choose resolution and span, then
  *  decide whether it runs standard or under stress. The same run spec drives the
@@ -20,10 +23,12 @@ export function WorkflowPanel({
   const resolution = useStore((s) => s.resolution);
   const preset = useStore((s) => s.preset);
   const setAsset = useStore((s) => s.setAsset);
+  const driftAnnual = useStore((s) => s.driftAnnual);
   const [busy, setBusy] = useState("");
 
   const summary = profiles[asset];
   const chosen = options?.presets.find((p) => p.key === preset);
+  const span = summary ? horizon(summary, nCandles) : null;
 
   const download = async (fmt: string) => {
     setBusy(fmt);
@@ -34,6 +39,7 @@ export function WorkflowPanel({
       resolution,
       preset,
       startPrice: summary?.last_close,
+      driftAnnual,
     };
     try {
       const filename = await exportRun(run, fmt);
@@ -98,9 +104,20 @@ export function WorkflowPanel({
             }}
           />
         </label>
-        <p className="hint">
-          daily bars simulated; {resolution === "daily" ? "shown as-is" : `aggregated to ${resolution}`}
-        </p>
+        {/* a bar count hides the calendar: 1500 bars is 4.1y of 365-day crypto but
+            6.0y of business days, and dispersion grows with the root of that span */}
+        {span && (
+          <p className="hint">
+            <strong>{span.years.toFixed(1)} years</strong> at {summary.periods_per_year} bars/yr
+            {resolution !== "daily" && ` · aggregated to ${resolution}`}
+            <br />
+            at {pct(summary.annual_vol)} vol, ~90% of paths end between{" "}
+            <strong>
+              {mult(span.lowMultiple)} and {mult(span.highMultiple)}
+            </strong>{" "}
+            of the start — a lognormal guide only; fat tails and clustering run wider.
+          </p>
+        )}
       </section>
 
       <section>
@@ -120,6 +137,39 @@ export function WorkflowPanel({
           ))}
         </div>
         {chosen && <p className="hint">{chosen.description}</p>}
+      </section>
+
+      <section>
+        <h2>Drift</h2>
+        <div className="seg">
+          <button
+            className={driftAnnual === null ? "on" : ""}
+            disabled={disabled}
+            onClick={() => useStore.setState({ driftAnnual: null })}
+          >
+            calibrated
+          </button>
+          <button
+            className={driftAnnual === 0 ? "on" : ""}
+            disabled={disabled}
+            onClick={() => useStore.setState({ driftAnnual: 0 })}
+          >
+            zero
+          </button>
+        </div>
+        {summary && (
+          <p className="hint">
+            {driftAnnual === null ? (
+              <>
+                Calibrated: <strong>{pct(summary.drift_ann)}/yr</strong> ± {pct(summary.drift_ann_se)}.
+                {summary.drift_ann_se > Math.abs(summary.drift_ann) / 2 &&
+                  " Barely distinguishable from zero, yet it compounds over the whole run."}
+              </>
+            ) : (
+              <>Trend removed; volatility and regimes are untouched.</>
+            )}
+          </p>
+        )}
       </section>
 
       <section>

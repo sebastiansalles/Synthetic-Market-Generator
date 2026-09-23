@@ -330,6 +330,15 @@ class HMMRegimes:
     def state_vol_ann(self, periods_per_year: int = 252) -> np.ndarray:
         return self.state_vol * np.sqrt(periods_per_year)
 
+    @property
+    def stationary(self) -> np.ndarray:
+        """Long-run time share of each regime: the left eigenvector of the transition
+        matrix for eigenvalue 1. This is the weighting under which per-state
+        quantities combine into the chain's long-run average."""
+        values, vectors = np.linalg.eig(self.transition.T)
+        pi = np.real(vectors[:, np.argmin(np.abs(values - 1.0))])
+        return pi / pi.sum()
+
     def state_path(self, r: pd.Series) -> np.ndarray:
         """Viterbi path, canonically ordered (0 = calmest state)."""
         raw = self.model.predict(np.asarray(r, dtype=float).reshape(-1, 1))
@@ -595,8 +604,28 @@ def simulate_garch_t(params: dict, n: int, rng) -> np.ndarray:
     return params["mu"] + eps
 
 
+def calibrated_drift(profile: AssetProfile) -> float:
+    """The chain's long-run per-period drift: per-state mu weighted by how much time
+    the regime chain spends in each state."""
+    mu = np.array([_sim_safe_garch(x)["mu"] for x in profile.state_garch])
+    return float(np.dot(profile.hmm.stationary, mu))
+
+
+def shift_state_drift(profile: AssetProfile, target_per_period: float) -> np.ndarray:
+    """Per-state mu shifted so the chain's long-run drift equals `target_per_period`.
+
+    Shifts rather than overwrites, so the calibrated *spread* between regimes survives
+    — turbulent states keep their characteristically negative mean relative to calm
+    ones. Drift is the least identified parameter in the whole model (BTC: 45.7%/yr
+    with a standard error near 19pp) yet it compounds over multi-year horizons, so
+    being able to neutralize it is a modelling control, not a convenience."""
+    mu = np.array([_sim_safe_garch(x)["mu"] for x in profile.state_garch])
+    return mu - float(np.dot(profile.hmm.stationary, mu)) + target_per_period
+
+
 def conditional_returns(profile: AssetProfile, states: np.ndarray, rng,
-                        jumps: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+                        jumps: np.ndarray | None = None,
+                        mu_states: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Per-state GARCH(1,1)-t returns for a GIVEN regime path; also returns the
     conditional variance path h (the OHLC bridge needs it). Variance re-initializes
     at the new state's unconditional level on every regime switch.
@@ -607,7 +636,8 @@ def conditional_returns(profile: AssetProfile, states: np.ndarray, rng,
     returned series afterwards would give a crash with an implausibly calm sequel."""
     n = len(states)
     g = [_sim_safe_garch(x) for x in profile.state_garch]
-    mu = np.array([x["mu"] for x in g])[states]
+    by_state = np.array([x["mu"] for x in g]) if mu_states is None else np.asarray(mu_states, float)
+    mu = by_state[states]
     omega = np.array([x["omega"] for x in g])[states]
     alpha = np.array([x["alpha"] for x in g])[states]
     beta = np.array([x["beta"] for x in g])[states]

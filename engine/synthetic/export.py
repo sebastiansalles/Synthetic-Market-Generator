@@ -124,6 +124,7 @@ class ExportManifest:
     resolution: str
     scenario: dict | None
     start_price: float
+    drift_annual: float | None = None  # None = the profile's calibrated drift
     engine_version: str = ENGINE_VERSION
     created_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     payload_sha256: str = ""

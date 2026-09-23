@@ -10,6 +10,7 @@ interface ChartState {
   nCandles: number;
   resolution: string;
   preset: string;
+  driftAnnual: number | null; // null = the profile's calibrated drift
   viewport: Viewport;
   status: string;
   live: LiveState | null;
@@ -49,6 +50,7 @@ export const useStore = create<ChartState>((set, get) => ({
   nCandles: 1500,
   resolution: "daily",
   preset: "standard",
+  driftAnnual: null,
   viewport: { offset: 0, candlesPerPixel: 1 }, // matches defaultViewport(1500): no snap on first data
   status: "idle",
   live: null,

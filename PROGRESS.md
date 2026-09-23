@@ -469,3 +469,54 @@ era-contamination already documented for the regime mix in Session 6.
 - Drift controls (calibrated / zero / custom): `se(mu_ann)` for BTC is **29.8pp** on a
   45.7%/yr estimate — the drift is barely identified yet compounds over years.
 - Chart momentum/inertia still unimplemented.
+
+## Session 20 — 2026-09-22 — Horizon legibility + drift controls
+
+The two improvements identified in Session 19 as making the model's behaviour
+*legible* rather than alarming. Neither changes the calibrated model.
+
+**Horizon legibility.** A bar count hides the calendar: 1500 bars is 4.1 years of
+365-day crypto but 6.0 years of business days, and dispersion grows with the root of
+that span. The panel now states the span in years and the implied central-90% band:
+
+| asset | 1500 bars | vol | ~90% terminal band |
+|---|---|---|---|
+| eurusd | 6.0 y | 9.0% | 0.70x – 1.43x |
+| btcusd | 4.1 y | 65.7% | 0.11x – 8.94x |
+
+Labelled a lognormal *guide*, not a claim: the model's fat tails and clustering run
+wider than lognormal, and a sample path at seed 5 reached 25x against a stated 8.94x
+top. Saying "90% band" without that caveat would have been the same class of
+overstatement as the old `annual_vol` field.
+
+**Drift controls.** `Scenario`-independent: `drift_annual` (None = calibrated, 0
+neutralizes). `shift_state_drift` *shifts* per-state mu so the chain's stationary-
+weighted drift hits the target, rather than overwriting it — turbulent regimes keep
+their characteristically lower mean relative to calm ones. `HMMRegimes.stationary`
+(left eigenvector for eigenvalue 1) is the weighting; verified invariant under the
+chain. Threaded through `/simulate`, `/export` and the manifest.
+
+Rationale, now surfaced in the UI: BTC's drift is **45.7%/yr with se ~19pp** — barely
+distinguishable from zero, yet it compounds across the whole run. Measured effect on
+BTC over 1500 bars: median 4.45x calibrated vs 0.68x at zero drift, with volatility
+identical (72.1% both) — the shift moves the level and nothing else.
+
+**Process note worth keeping.** The first drift test asserted that zero-drift runs
+have ~zero mean return and it FAILED at -14.6%/yr. That was not a bug: at BTC's
+volatility the standard error of a drift estimate over 800 bars is ~49%/yr per path,
+so -14.6% across 12 paths is a 1-sigma draw. Rewritten as a **paired difference** —
+same seed gives the same regime path and bit-identical innovations, and the shift is
+uniform across states, so the two runs differ by exactly the drift. Now exact to
+1e-6 instead of statistical. The near-miss is itself the argument for the feature.
+
+**Corrected**: `drift_ann_se` reads **19.0pp**, not the ~30pp quoted in Session 19 —
+that figure came from the Student-t scale before it was replaced by realized vol.
+Fixed in the code comments too.
+
+**Validation**: 111 pytest (+3) / 44 vitest (+4); tsc + build clean. Verified live:
+horizon/drift/band readouts, drift override end-to-end, manifest records it.
+
+**Next (the one remaining substantial item)**: era-weighted calibration. BTC vol is
+fitted across 2014-2026 (65.7%) while its recent era runs 47.6% — a ~40% overstatement
+driven by data that arguably no longer describes the asset. Touches every number in
+the project, so it needs its own holdout gate, like Phase 1's.
