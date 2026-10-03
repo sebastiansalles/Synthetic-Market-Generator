@@ -27,6 +27,7 @@ export function App() {
   const preset = useStore((s) => s.preset);
   const driftAnnual = useStore((s) => s.driftAnnual);
   const status = useStore((s) => s.status);
+  const theme = useStore((s) => s.theme);
   const hasBars = useStore((s) => s.bars.length > 0);
   const isLive = useStore((s) => s.live !== null);
   const setAsset = useStore((s) => s.setAsset);
@@ -117,6 +118,12 @@ export function App() {
           ↻ new seed
         </button>
         <button onClick={resetView}>reset view</button>
+        <button
+          onClick={() => useStore.getState().setTheme(theme === "dark" ? "light" : "dark")}
+          title="toggle light / dark theme"
+        >
+          {theme === "dark" ? "☀ light" : "☾ dark"}
+        </button>
         {!isLive ? (
           <button className="live-btn" onClick={startLive}>
             ▶ live

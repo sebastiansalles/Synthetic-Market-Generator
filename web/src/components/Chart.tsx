@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { layoutCandles, volumeProfile } from "../engine/candles";
-import { drawChart } from "../engine/renderer";
+import { drawChart, THEMES } from "../engine/renderer";
 import { followOffset, priceToY, wheelZoomFactor } from "../engine/viewport";
 import { useStore } from "../store";
 
@@ -21,7 +21,7 @@ export function Chart() {
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const { bars, viewport, live } = useStore.getState();
+    const { bars, viewport, live, theme } = useStore.getState();
     // live mode displays completed bars + the forming candle; static mode the fetched set
     const display =
       live !== null
@@ -83,7 +83,7 @@ export function Chart() {
       ctx,
       layout,
       { width: cssW, height: cssH, priceHeight, axisWidth: AXIS_WIDTH },
-      undefined,
+      THEMES[theme],
       live ? { states: live.states, formingIndex: live.forming ? display.length - 1 : null } : undefined,
       profile,
       crossInfo,

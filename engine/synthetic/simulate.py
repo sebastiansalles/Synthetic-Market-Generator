@@ -100,10 +100,14 @@ def build_scenario(preset: str, n_candles: int, profile: AssetProfile) -> Scenar
 
     # state_vol is already per-period (daily); state_vol_ann is the annualized view
     turbulent_daily_sigma = float(profile.hmm.state_vol[-1])
+    crash_at = int(n_candles * 0.6)
     return Scenario(
-        force_state=1,
-        n_candles=0,  # the crash arrives out of a normal market, not a forced one
-        jump_at=int(n_candles * 0.6),
+        # the calm regime is FORCED until the crash — the preset promises "a calm
+        # run, then a collapse"; without this the natural chain opens turbulent
+        # ~20% of the time and the calm run the user came to see never appears
+        force_state=0,
+        n_candles=max(1, crash_at),
+        jump_at=crash_at,
         jump_return=-FLASH_CRASH_SIGMA * turbulent_daily_sigma,
     )
 

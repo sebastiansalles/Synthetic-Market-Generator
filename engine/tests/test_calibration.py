@@ -380,3 +380,33 @@ def test_profile_carries_last_real_close_anchor():
     )
     profile = calibrate(df, asset="synthetic", n_states=2, seed=0)
     assert np.isclose(profile.last_close, close[-1])
+
+
+def test_calibrate_respects_history_window():
+    rng = np.random.default_rng(44)
+    transition = np.array([[0.97, 0.03], [0.06, 0.94]])
+    states = np.empty(2600, int)
+    states[0] = 0
+    for t in range(1, 2600):
+        states[t] = rng.choice(2, p=transition[states[t - 1]])
+    r_np = np.array([0.005, 0.012])[states] * rng.standard_normal(2600)
+    close = 100 * np.exp(np.cumsum(r_np))
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2015-01-01", periods=2600, freq="B"),
+            "open": close, "high": close, "low": close, "close": close, "volume": 0.0,
+        }
+    )
+
+    full = calibrate(df, asset="synthetic", n_states=2, seed=0)
+    era = calibrate(df, asset="synthetic", n_states=2, seed=0, max_history_years=2.0)
+
+    assert era.history_years == 2.0
+    assert full.history_years is None
+    assert era.n_bars < full.n_bars
+    assert era.n_bars > 300  # ~2 years of business days
+    # the window slices FROM THE END: anchor and era stats match the tail
+    assert np.isclose(era.last_close, full.last_close)
+    tail = df[df["timestamp"] >= df["timestamp"].max() - pd.Timedelta(days=365.25 * 2)]
+    tail_ret = np.log(tail["close"]).diff().dropna()
+    assert abs(era.targets["vol"] - tail_ret.std()) < 1e-12

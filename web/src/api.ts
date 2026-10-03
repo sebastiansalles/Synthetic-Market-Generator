@@ -28,6 +28,7 @@ export interface ProfileSummary {
   periods_per_year: number;
   drift_ann: number;
   drift_ann_se: number;
+  history_years: number | null;
 }
 
 /** What a run of `nCandles` bars actually means for this asset. Bar counts hide the

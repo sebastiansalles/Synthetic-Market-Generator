@@ -448,6 +448,7 @@ class AssetProfile:
     scrub: ScrubReport
     volume: object = None  # VolumeModel; None/False-y means "emit zeros"
     last_close: float = 100.0  # anchor: simulations start from the last real close
+    history_years: float | None = None  # era window the profile was fitted on (None = full)
     last_date: str | None = None  # anchor: simulations continue forward from this bar
 
 
@@ -469,11 +470,17 @@ def fit_state_innovation_df(r: pd.Series, hmm: HMMRegimes, min_days: int = 30) -
 
 
 def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int | None = None,
-              n_states: int = 2, seed: int = 0) -> AssetProfile:
+              n_states: int = 2, seed: int = 0,
+              max_history_years: float | None = None) -> AssetProfile:
     """Full calibration pipeline: OHLCV frame -> scrubbed returns -> AssetProfile.
 
     `periods_per_year` and scrub gap tolerance default to the asset's registry spec
-    (plug-and-play): calibrate(df, asset="btcusd") uses a 365-day calendar."""
+    (plug-and-play): calibrate(df, asset="btcusd") uses a 365-day calendar.
+
+    `max_history_years` fits on the most recent era only — non-stationary assets
+    (e.g. BTC's 1000x growth) carry risk parameters from eras that no longer
+    describe them; the window is recorded on the profile for transparency."""
+
     from synthetic.registry import REGISTRY
     from synthetic.volume import fit_volume
 
@@ -481,6 +488,10 @@ def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int | 
     if periods_per_year is None:
         periods_per_year = spec.ppy_daily if spec else 252
     max_gap_days = spec.scrub_max_gap_days if spec else 6.0
+
+    if max_history_years is not None:
+        cutoff = df["timestamp"].max() - pd.Timedelta(days=365.25 * max_history_years)
+        df = df[df["timestamp"] >= cutoff].reset_index(drop=True)
 
     r = log_returns(df)
     clean, report = scrub_returns(r, max_gap_days=max_gap_days)
@@ -501,6 +512,7 @@ def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int | 
         volume=fit_volume(df, clean, hmm),
         last_close=float(df["close"].iloc[-1]),
         last_date=str(pd.Timestamp(df["timestamp"].iloc[-1]).date()),
+        history_years=max_history_years,
     )
 
 

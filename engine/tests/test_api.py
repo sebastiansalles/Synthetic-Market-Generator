@@ -403,3 +403,39 @@ def test_tick_stream_carries_state_for_heatmap():
         assert ticks.loc[ticks.bar_id == bar_id, "state"].nunique() == 1
     # every tick annotated: bar count x ticks_per_candle rows
     assert len(ticks) == 50 * 8
+
+
+def test_recalibrate_with_history_window_saves_named_artifact(monkeypatch, tmp_path):
+    import app as app_module
+
+    seen = {}
+
+    def spy_calibrate(df, asset, **kw):
+        seen["max_history_years"] = kw.get("max_history_years")
+        from synthetic.calibration import AssetProfile, FitResult, fit_hmm_regimes, log_returns, scrub_returns
+
+        r, rep = scrub_returns(log_returns(df))
+        hmm = fit_hmm_regimes(r, n_states=2, seed=0)
+        zero = FitResult("gbm", {"mu": 0.0, "sigma": 0.1}, 0.0, 2, {}, True)
+        tfit = FitResult("student_t", {"df": 5.0, "mu": 0.0, "sigma": 0.1}, 0.0, 3, {}, True)
+        g = {"mu": 0, "omega": 1e-5, "alpha": 0.05, "beta": 0.9, "persistence": 0.95,
+             "nu": 8.0, "uncond_var": r.var(), "n_days": len(r)}
+        return AssetProfile(asset=asset, periods_per_year=365, n_bars=len(r),
+                            targets={"mean": 0.0, "vol": r.std(), "kurt": r.kurt()},
+                            gbm=zero, student_t=tfit, merton_jd=zero,
+                            garch={"persistence": 0.95}, state_garch=[dict(g), dict(g)],
+                            hmm=hmm, state_innov_df=np.array([np.inf, np.inf]),
+                            scrub=rep, volume=None, last_close=1.0,
+                            history_years=kw.get("max_history_years"))
+
+    monkeypatch.setattr(app_module, "calibrate", spy_calibrate)
+    monkeypatch.setattr(app_module, "DEFAULT_PROFILE_DIR", tmp_path)
+    app_module._profile_cache.clear()
+
+    resp = client.post("/profiles/btcusd/recalibrate?max_history_years=4")
+    assert resp.status_code == 202
+    assert seen["max_history_years"] == 4.0
+    assert (tmp_path / "btcusd_last4y.pkl").exists()
+    body = resp.json()["profile"]
+    assert body["history_years"] == 4.0
+    assert body["periods_per_year"] == 365  # registry spec of the BASE asset, not the suffix

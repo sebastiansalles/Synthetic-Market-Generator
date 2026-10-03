@@ -4,16 +4,39 @@ import { ChartLayout, VolumeProfileBin } from "./candles";
 import { heatColor } from "./live";
 import { niceTicks, priceToY } from "./viewport";
 
-export const THEME = {
-  bg: "#0d1117",
-  grid: "#1c2330",
-  axisText: "#8b949e",
-  axisLine: "#30363d",
-  bull: "#26a69a",
-  bear: "#ef5350",
-  volume: "#39424f",
-  crosshair: "#c9d1d9",
+export const THEMES = {
+  dark: {
+    bg: "#0d1117",
+    grid: "#1c2330",
+    axisText: "#8b949e",
+    axisLine: "#30363d",
+    bull: "#26a69a",
+    bear: "#ef5350",
+    volume: "#39424f",
+    crosshair: "#c9d1d9",
+    accent: "#1f6feb",
+    accentSoft: "rgba(88, 166, 255, 0.25)",
+    panelFade: "rgba(1, 4, 9, 0.78)",
+  },
+  light: {
+    bg: "#ffffff",
+    grid: "#e8edf5",
+    axisText: "#5b6472",
+    axisLine: "#d0d7e2",
+    bull: "#0e9f6e",
+    bear: "#e02444",
+    volume: "#c3cfe3",
+    crosshair: "#1f2937",
+    accent: "#0b5fff",
+    accentSoft: "rgba(11, 95, 255, 0.20)",
+    panelFade: "rgba(255, 255, 255, 0.85)",
+  },
 } as const;
+
+export type ThemeName = keyof typeof THEMES;
+
+/** Back-compat alias: the dark theme (charts used to be dark-only). */
+export const THEME = THEMES.dark;
 
 export interface DrawOptions {
   width: number;
@@ -42,7 +65,7 @@ export function drawChart(
   ctx: CanvasRenderingContext2D,
   layout: ChartLayout,
   opts: DrawOptions,
-  theme: typeof THEME = THEME,
+  theme: (typeof THEMES)[ThemeName] = THEMES.dark,
   overlay?: LiveOverlay,
   profile?: ProfileDraw[],
   crosshair?: CrosshairInfo,
@@ -114,7 +137,7 @@ export function drawChart(
   // volume profile: horizontal histogram of volume-at-price (right-aligned strip)
   if (profile && profile.length > 0) {
     const strip = 56;
-    ctx.fillStyle = "rgba(88, 166, 255, 0.25)";
+    ctx.fillStyle = theme.accentSoft;
     for (const bin of profile) {
       const h = Math.max(1, (priceHeight / profile.length) * 0.8);
       ctx.fillRect(plotW - strip * bin.frac, bin.y - h / 2, strip * bin.frac, h);
@@ -165,7 +188,7 @@ export function drawChart(
     const tag = formatPrice(crosshair.price);
     ctx.font = "11px ui-monospace, monospace";
     const tw = ctx.measureText(tag).width + 8;
-    ctx.fillStyle = "#1f6feb";
+    ctx.fillStyle = theme.accent;
     ctx.fillRect(plotW + 1, crosshair.py - 9, Math.max(tw, axisWidth - 2), 18);
     ctx.fillStyle = "#ffffff";
     ctx.textAlign = "left";
@@ -174,7 +197,7 @@ export function drawChart(
     const c = layout.visible[rel];
     if (c && g) {
       const txt = `O ${formatPrice(c.open)}  H ${formatPrice(c.high)}  L ${formatPrice(c.low)}  C ${formatPrice(c.close)}`;
-      ctx.fillStyle = "rgba(1, 4, 9, 0.75)";
+      ctx.fillStyle = theme.panelFade;
       ctx.fillRect(6, 6, ctx.measureText(txt).width + 12, 18);
       ctx.fillStyle = theme.crosshair;
       ctx.fillText(txt, 12, 15.5);

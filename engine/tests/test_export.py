@@ -224,6 +224,8 @@ def test_flash_crash_produces_a_crash_scaled_to_the_asset(profiles):
     p = profiles["eurusd"]
     scenario = build_scenario("flash_crash", 200, p)
     assert scenario.jump_at == 120
+    # the calm run is guaranteed, not left to the Markov chain's mood
+    assert scenario.force_state == 0 and scenario.n_candles == 120
     # 8 turbulent-state sigmas, taken from the profile rather than hand-set
     assert scenario.jump_return == pytest.approx(-8.0 * p.hmm.state_vol[-1])
 
@@ -231,6 +233,16 @@ def test_flash_crash_produces_a_crash_scaled_to_the_asset(profiles):
     r = np.log(out["close"]).diff().to_numpy()
     assert r[scenario.jump_at] < 0.5 * scenario.jump_return  # the crash landed
     assert r[scenario.jump_at] == min(r[1:])  # and it is the worst day of the path
+
+
+def test_flash_crash_guarantees_the_calm_run(profiles):
+    """The forced-calm prefix must hold under every seed, not just on average —
+    this is the exact behavior the preset's description promises."""
+    p = profiles["eurusd"]
+    for seed in range(5):
+        _, dbg = simulate(p, 200, scenario=build_scenario("flash_crash", 200, p),
+                          seed=seed, debug=True)
+        assert (dbg["states"][:120] == 0).all(), f"seed {seed} opened turbulent"
 
 
 def test_jump_propagates_into_the_garch_aftershock(profiles):

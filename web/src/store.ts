@@ -3,6 +3,13 @@ import { Candle } from "./engine/candles";
 import { initLive, LiveState, reduceEvent, WsEvent } from "./engine/live";
 import { Viewport, panBy, zoomAt } from "./engine/viewport";
 
+export type Theme = "dark" | "light";
+
+const storedTheme = (): Theme =>
+  typeof localStorage !== "undefined" && localStorage.getItem("smg-theme") === "light"
+    ? "light"
+    : "dark";
+
 interface ChartState {
   asset: string;
   bars: Candle[];
@@ -16,6 +23,7 @@ interface ChartState {
   live: LiveState | null;
   follow: boolean; // live mode: keep the tail in view until the user pans
   crosshair: { px: number; py: number } | null;
+  theme: Theme;
   setAsset: (a: string) => void;
   setBars: (bars: Candle[], asset: string) => void;
   setStatus: (s: string) => void;
@@ -26,6 +34,7 @@ interface ChartState {
   applyWsEvent: (ev: WsEvent) => void;
   stopLive: () => void;
   setCrosshair: (c: { px: number; py: number } | null) => void;
+  setTheme: (t: Theme) => void;
 }
 
 const defaultViewport = (nBars: number): Viewport => ({
@@ -74,6 +83,11 @@ export const useStore = create<ChartState>((set, get) => ({
   applyWsEvent: (ev) => set((s) => (s.live ? { live: reduceEvent(s.live, ev) } : {})),
   stopLive: () => set({ live: null, bars: [] }), // no stale flash while static refetches
   setCrosshair: (crosshair) => set({ crosshair }),
+  theme: storedTheme(),
+  setTheme: (theme) => {
+    if (typeof localStorage !== "undefined") localStorage.setItem("smg-theme", theme);
+    set({ theme });
+  },
   // zooming never fights the live-follow; panning hands control to the user
   zoomAtPx: (anchorPx, factor, widthPx) =>
     set({ viewport: zoomAt(get().viewport, anchorPx, factor, widthPx, displayCount(get())) }),

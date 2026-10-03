@@ -520,3 +520,34 @@ horizon/drift/band readouts, drift override end-to-end, manifest records it.
 fitted across 2014-2026 (65.7%) while its recent era runs 47.6% — a ~40% overstatement
 driven by data that arguably no longer describes the asset. Touches every number in
 the project, so it needs its own holdout gate, like Phase 1's.
+
+## Session 15 — 2026-09-21 — Era-weighted calibration (the last substantial item)
+
+**Done**
+- `calibrate(..., max_history_years=N)`: trailing-era window before fitting — the era weight is a window choice, every estimator untouched. `AssetProfile.history_years`; API `recalibrate?max_history_years=N` persists named artifacts (`{asset}_last{N}y.pkl`, simulatable by stem; full-history default untouched). 2 new engine tests (window slicing from the end, tail-stats equality) + 1 API test (suffixed artifact, base-asset ppy preserved).
+- `notebooks/02_era_weighting.ipynb` (7 cells, executed, 0 errors): the study + gate.
+
+**Findings (judged on the unseen last 1y, 300 seeded sims, seed 77)**
+- Era-dependence is real and bidirectional: rolling-2y vol NOW vs full-sample — BTC 44.7% vs 66.6% (sample min vs max 88.9%), gold 24.4% vs 18.9% (near max), EUR 7.0% vs 11.0% (raw).
+- BTC gate curve: full-history FAIL (fitted 3.44%/day vs realized 2.38%, band [2.88, 3.99]) → 3y window **PASS** (2.48%, band [2.24, 2.79]) → 4y MARGINAL (2.78%) → 5y FAIL (3.10%). Shorter windows track the present at the cost of noisier weakly-identified params (drift, dwell).
+- Controls: EUR improves with era-weighting (0.57→0.47%/day fitted; last year calm even by recent standards), gold fails every window — its 2026 crisis year exceeds all history.
+- **Named limit**: no backward-looking window captures a genuinely unprecedented regime — that is what Phase 5 scenario injection is for (stress from scenarios, not from stretching history).
+
+**Artifacts**: `data/profiles/btcusd_last3y.pkl` (fitted 2.47%/day), `btcusd_last4y.pkl` (2.45%). Incident + fix: the first notebook save used the default path and overwrote `btcusd.pkl` (era saved over full-history because `profile.asset` is unchanged) — full-history restored, era saves now use explicit suffixed paths; recalibrate-endpoint suffix design validated.
+
+**Status**: 113 pytest / 44 vitest green. Era-weighting closes its own holdout gate (3y PASS where full-history FAILS) and ships as opt-in named artifacts — recommendation: per-asset window choice, documented per profile, not a global switch. Uncommitted; ready to commit with the user's review.
+
+## Session 16 — 2026-09-21 — UX feedback round (user-reported)
+
+**Fixed**
+- Flash-crash preset now delivers its promised "calm run, then collapse": the calm regime is *forced* until the crash candle (previously the natural chain opened turbulent ~20% of seeds — the reported "sometimes no calm run"). Regression-tested across 5 seeds; crash still lands at 8 turbulent σ and propagates through the GARCH aftershock.
+- "Three Bitcoins" picker: era variants (`btcusd_last3y/4y`) now render as options *under* one Bitcoin group (`grouped()` helper, vitested); API `display_name` resolves era stems to the base asset.
+
+**Added**
+- **Light mode** (`THEMES` dark/light in the renderer, CSS variables, ☀/☾ toggle, persisted) + visual pass: cleaner typography, card-style workflow sections, themed chart accents.
+- `docs/WHY_SO_VOLATILE.md` — the seed-to-seed shock explained: √T dispersion bands per asset (EUR ×0.70–1.43, BTC ×0.11–8.9 over the default run), random regime-path placement ("same climate, different weather"), zero identifiable drift for EUR; what's stable across seeds and how to work with it.
+- `docs/ON_CONVERGENCE_AND_PREDICTION.md` — analysis of the convergence-as-prediction theory: LLN converges to the *model's* distribution; price prophecy fails on non-stationarity (era study) and the martingale property (drift unidentified for EUR); the real gem is the *risk oracle* — regime-conditional vol forecasting, tail quantification, validated by the holdout gates; testable-frontier table.
+
+**Clarified (no change needed)**: drift defaults to the calibrated intrinsic value (shown with ±SE); "zero" is an analysis override, secondary by design.
+
+**Status**: 114 pytest (36 API) / 46 vitest; builds clean. Uncommitted with the era-weighting + instructions batch.

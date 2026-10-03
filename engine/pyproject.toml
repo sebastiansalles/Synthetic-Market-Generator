@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "matplotlib", "jupyter", "yfinance"]
+api = ["fastapi", "uvicorn[standard]", "httpx"]  # httpx: TestClient
 
 [tool.setuptools.packages.find]
 include = ["synthetic*"]

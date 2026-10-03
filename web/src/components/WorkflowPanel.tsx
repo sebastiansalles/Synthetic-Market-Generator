@@ -5,6 +5,21 @@ import { useStore } from "../store";
 const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 const mult = (x: number) => (x >= 10 ? `${x.toFixed(0)}x` : `${x.toFixed(2)}x`);
 
+/** One market per group: era-window variants (e.g. btcusd_last3y) render as options
+ *  UNDER their base asset instead of multiplying the picker with "three Bitcoins". */
+export function grouped(
+  profiles: Record<string, ProfileSummary>,
+): [string, { stem: string; label: string }[]][] {
+  const bases = new Map<string, { stem: string; label: string }[]>();
+  for (const stem of Object.keys(profiles)) {
+    const m = /^(.*)_last([\d.]+)y$/.exec(stem);
+    const base = m ? m[1] : stem;
+    if (!bases.has(base)) bases.set(base, []);
+    bases.get(base)!.push({ stem, label: m ? `Last ${m[2]} years` : "Full history" });
+  }
+  return [...bases.entries()];
+}
+
 /** Phase 5's three-step workflow: pick a market, choose resolution and span, then
  *  decide whether it runs standard or under stress. The same run spec drives the
  *  chart and the export, so what is on screen is what lands on disk. */
@@ -58,10 +73,14 @@ export function WorkflowPanel({
           <span className="step">1</span> Market
         </h2>
         <select value={asset} onChange={(e) => setAsset(e.target.value)} disabled={disabled}>
-          {Object.entries(profiles).map(([k, p]) => (
-            <option key={k} value={k}>
-              {p.display_name}
-            </option>
+          {grouped(profiles).map(([base, variants]) => (
+            <optgroup key={base} label={profiles[base]?.display_name ?? base}>
+              {variants.map((v) => (
+                <option key={v.stem} value={v.stem}>
+                  {v.label}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
         {summary && (
@@ -69,6 +88,7 @@ export function WorkflowPanel({
             calm/turbulent σ{" "}
             {summary.state_vol_ann.map((v) => `${(v * 100).toFixed(0)}%`).join(" / ")} · dwell{" "}
             {summary.expected_dwell_days.map((d) => `${d.toFixed(0)}d`).join(" / ")}
+            {summary.history_years != null && ` · fitted on the last ${summary.history_years}y`}
           </p>
         )}
       </section>

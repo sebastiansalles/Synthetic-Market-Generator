@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -98,9 +99,10 @@ def _f(x) -> float:
 
 def profile_summary(p: AssetProfile) -> dict:
     h = p.hmm
+    base = re.sub(r"_last[\d.]+y$", "", p.asset)  # era variants share the base asset's identity
     return {
         "asset": p.asset,
-        "display_name": (REGISTRY.get(p.asset).display_name if p.asset in REGISTRY else p.asset),
+        "display_name": (REGISTRY.get(base).display_name if base in REGISTRY else p.asset),
         "periods_per_year": p.periods_per_year,
         "n_bars": p.n_bars,
         "targets": {k: _f(v) for k, v in p.targets.items()},
@@ -126,6 +128,7 @@ def profile_summary(p: AssetProfile) -> dict:
         # se(mu) ~ sigma/sqrt(T): drift is the least identified parameter in the model
         "drift_ann_se": _f(p.targets["vol"] * np.sqrt(p.periods_per_year)
                            / np.sqrt(p.n_bars / p.periods_per_year)),
+        "history_years": getattr(p, "history_years", None),
     }
 
 
@@ -290,17 +293,24 @@ def export_endpoint(body: ExportIn) -> Response:
 
 
 @app.post("/profiles/{asset}/recalibrate", status_code=202)
-def recalibrate(asset: str, seed: int = Query(default=0)) -> dict:
-    """Re-run the full empirical calibration from the processed Parquet and persist."""
+def recalibrate(asset: str, seed: int = Query(default=0),
+                max_history_years: float | None = Query(default=None, gt=0)) -> dict:
+    """Re-run the full empirical calibration from the processed Parquet and persist.
+
+    With `max_history_years` the profile is fitted on the most recent era only and
+    saved as a separate named artifact (`{asset}_last{N}y.pkl`) — simulatable by its
+    stem; the full-history profile is untouched."""
     if asset not in REGISTRY:
         raise HTTPException(404, f"'{asset}' not in registry")
     parquet = DEFAULT_PROCESSED_DIR / f"{asset}_1d.parquet"
     if not parquet.exists():
         raise HTTPException(404, f"no processed data for '{asset}' — run: python -m synthetic.data download --only {asset}")
     df = pd.read_parquet(parquet)
-    profile = calibrate(df, asset=asset, seed=seed)
-    path = save_profile(profile, DEFAULT_PROFILE_DIR / f"{asset}.pkl")
-    _profile_cache[asset] = (path.stat().st_mtime, profile)
+    profile = calibrate(df, asset=asset, seed=seed, max_history_years=max_history_years)
+    suffix = f"_last{max_history_years:g}y" if max_history_years else ""
+    stem = f"{asset}{suffix}"
+    path = save_profile(profile, DEFAULT_PROFILE_DIR / f"{stem}.pkl")
+    _profile_cache[stem] = (path.stat().st_mtime, profile)
     return {"status": "recalibrated", "profile": profile_summary(profile)}
 
 
