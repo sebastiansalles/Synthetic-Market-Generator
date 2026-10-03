@@ -551,3 +551,22 @@ the project, so it needs its own holdout gate, like Phase 1's.
 **Clarified (no change needed)**: drift defaults to the calibrated intrinsic value (shown with ±SE); "zero" is an analysis override, secondary by design.
 
 **Status**: 114 pytest (36 API) / 46 vitest; builds clean. Uncommitted with the era-weighting + instructions batch.
+
+## Session 17 — 2026-09-21 — UX round 2 + distribution mode (user-reported)
+
+**Fixed**
+- Live no longer snaps to a fresh static chart on completion/stop: `promoteLive()` keeps the generated session; `runKey` (asset|candles|seed|resolution|preset|drift) means unchanged settings never refetch — also kills redundant fetches generally.
+- Live counter: isolated `<LiveCounter>` component shows `▶ x/400` (x = completed + forming), re-rendering alone per tick.
+- Market picker showed "Full history" without the market name: option labels are now `Bitcoin — Full history` / `Bitcoin — Last 3 years` (optgroup still groups them).
+- Scenarios "not working": two causes — (a) a one-candle 8σ shock is invisible at overview zoom, and (b) at 60% of a 1500-candle path it sat far right. `/simulate` now returns `shock_at`; the frontend flags the shock on-chart and auto-pans to it. Flash-crash keeps its forced-calm prefix.
+- "Instant chart" perception: generation is genuinely ~100 ms (profiles precomputed; the compute lives in calibration) — the new **distribution mode** makes compute visible (200 paths ≈ 1–3 s with a live status line).
+
+**Added — distribution over N candles ("the distribution IS the product")**
+- `POST /ensemble`: seeded N-path × M-candle close matrix (caps 400×2000; presets/drift/anchor honored; `shock_at` echoed). Gotcha re-learned: routes appended after the StaticFiles mount are shadowed (second occurrence — mount must stay last).
+- `web/src/engine/ensemble.ts` (pure, vitested): interpolated percentile bands, terminal stats (median/p05/p95/P(loss)/P(≥2×)), terminal histogram.
+- `<EnsembleView>`: log-scale percentile fan (5–95 and 25–75 bands + median), terminal histogram strip, stats header, shock marker, themed.
+- Toolbar `single | distribution` mode switch; ensemble controls (paths/candles) with auto-recompute on store-linked inputs.
+
+**Drift copy** rewritten in plain language (average yearly pull; calibrated default with SE; zero = isolate the noise).
+
+**Status**: 116 pytest / 49 vitest; builds clean; live-smoke verified (`/ensemble` matrix + `shock_at` on both endpoints). Uncommitted with the earlier batches.

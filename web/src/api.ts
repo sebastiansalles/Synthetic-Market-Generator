@@ -106,10 +106,43 @@ async function postRun(url: string, run: RunSpec, extra: object = {}): Promise<R
   return resp;
 }
 
-export async function simulate(run: RunSpec): Promise<Candle[]> {
+export interface SimulationResult {
+  bars: Candle[];
+  shockAt: number | null; // candle index of an injected shock (flash crash), if any
+  preset: string | null;
+}
+
+export async function simulate(run: RunSpec): Promise<SimulationResult> {
   const resp = await postRun("/simulate", run);
   const body = await resp.json();
-  return body.bars as Candle[];
+  return { bars: body.bars as Candle[], shockAt: body.shock_at ?? null, preset: body.preset ?? null };
+}
+
+/** Many paths over N candles — the ensemble behind the distribution view. */
+export async function runEnsemble(params: {
+  asset: string;
+  nCandles: number;
+  nPaths: number;
+  seed: number;
+  preset: string;
+  startPrice?: number;
+  driftAnnual?: number | null;
+}): Promise<import("./engine/ensemble").EnsembleResult> {
+  const resp = await fetch("/ensemble", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      asset: params.asset,
+      n_candles: params.nCandles,
+      n_paths: params.nPaths,
+      seed: params.seed,
+      preset: params.preset === "standard" ? null : params.preset,
+      start_price: params.startPrice ?? null,
+      drift_annual: params.driftAnnual ?? null,
+    }),
+  });
+  if (!resp.ok) throw new Error(`/ensemble: ${resp.status}`);
+  return resp.json();
 }
 
 /** Fetch an export and hand it to the browser as a download. Returns the filename

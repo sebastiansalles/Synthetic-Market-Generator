@@ -57,6 +57,11 @@ export interface CrosshairInfo {
   price: number;
 }
 
+export interface MarkerInfo {
+  index: number; // candle index to flag
+  label: string;
+}
+
 export interface ProfileDraw extends VolumeProfileBin {
   y: number; // pixel row for the bin center
 }
@@ -69,6 +74,7 @@ export function drawChart(
   overlay?: LiveOverlay,
   profile?: ProfileDraw[],
   crosshair?: CrosshairInfo,
+  marker?: MarkerInfo,
 ): void {
   const { width, height, priceHeight, axisWidth } = opts;
   const plotW = width - axisWidth;
@@ -167,6 +173,30 @@ export function drawChart(
   ctx.moveTo(0, priceHeight + 24.5);
   ctx.lineTo(width, priceHeight + 24.5);
   ctx.stroke();
+
+  // scenario marker: flag the injected shock so a one-candle event is unmissable
+  if (marker && layout.geoms.length > 0) {
+    const g0 = layout.geoms[0].index;
+    const gi = marker.index - g0;
+    if (gi >= 0 && gi < layout.geoms.length) {
+      const x = Math.round(layout.geoms[gi].x) + 0.5;
+      ctx.strokeStyle = theme.bear;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, priceHeight);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "11px ui-monospace, monospace";
+      const tw = ctx.measureText(marker.label).width + 12;
+      const lx = Math.min(Math.max(x + 6, 6), plotW - tw - 6);
+      ctx.fillStyle = theme.bear;
+      ctx.fillRect(lx, 6, tw, 18);
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "left";
+      ctx.fillText(marker.label, lx + 6, 15.5);
+    }
+  }
 
   // crosshair: dashed lines, axis price tag, hovered-candle OHLC readout.
   // `index` is an absolute bar index; the visible window starts at geoms[0].index.

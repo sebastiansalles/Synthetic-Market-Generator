@@ -241,7 +241,10 @@ def simulate_endpoint(body: SimulateIn) -> dict:
     records = bars.copy()
     records["timestamp"] = pd.to_datetime(records["timestamp"]).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"asset": body.asset, "seed": body.seed, "n_candles": len(records),
-            "resolution": body.resolution, "bars": records.to_dict(orient="records")}
+            "resolution": body.resolution, "bars": records.to_dict(orient="records"),
+            # when a preset injects a shock (flash crash), tell the UI where to look
+            "shock_at": scenario.jump_at if scenario and scenario.jump_at is not None else None,
+            "preset": body.preset}
 
 
 class ExportIn(BaseModel):
@@ -389,8 +392,55 @@ async def ws_simulate(
             return  # socket already gone: the original error has nowhere to go
 
 
+# ---------------------------------------------------------------------------
+# Ensemble: many paths over N candles — the distribution IS the product
+# ---------------------------------------------------------------------------
+
+from synthetic.calibration import conditional_returns
+from synthetic.simulate import _drift_override, scenario_states
+
+
+class EnsembleIn(BaseModel):
+    asset: str
+    n_candles: int = Field(default=250, ge=10, le=2000)
+    n_paths: int = Field(default=200, ge=10, le=400)
+    seed: int = 0
+    preset: str | None = None
+    scenario: ScenarioIn | None = None  # explicit form; preset wins (same as /simulate)
+    start_price: float | None = Field(default=None)
+    drift_annual: float | None = None
+
+
+@app.post("/ensemble")
+def ensemble_endpoint(body: EnsembleIn) -> dict:
+    """Simulate n_paths close-price paths over n_candles and return the raw matrix.
+
+    Percentile bands and the terminal histogram are computed client-side (pure,
+    tested functions) so the UI can explore them without round trips. This is the
+    honest answer to 'what does the model say': not one path, the distribution.
+    """
+    profile = _get_profile(body.asset)
+    scenario = _resolve_scenario(body, profile)
+    start_price = body.start_price if body.start_price is not None else profile.last_close
+    mu_states = _drift_override(profile, body.drift_annual)
+    jumps = scenario.jump_path(body.n_candles) if scenario else None
+
+    rng = np.random.default_rng(body.seed)  # one stream: fully deterministic
+    paths = np.empty((body.n_paths, body.n_candles))
+    for i in range(body.n_paths):
+        states = scenario_states(profile, body.n_candles, scenario, rng)
+        r, _ = conditional_returns(profile, states, rng, jumps=jumps, mu_states=mu_states)
+        paths[i] = start_price * np.exp(np.cumsum(r))
+
+    return {"asset": body.asset, "seed": body.seed, "n_paths": body.n_paths,
+            "n_candles": body.n_candles, "start_price": start_price,
+            "shock_at": scenario.jump_at if scenario and scenario.jump_at is not None else None,
+            "preset": body.preset,
+            "paths": np.round(paths, 6).tolist()}
+
+
 # Single-port serving: the built frontend, served by the same process (mounted
-# last so the API routes above keep precedence).
+# LAST: mounts swallow everything after them, as /ws and /ensemble both proved).
 _DIST = REPO_ROOT / "web" / "dist"
 if _DIST.exists():
     app.mount("/", StaticFiles(directory=_DIST, html=True), name="web")

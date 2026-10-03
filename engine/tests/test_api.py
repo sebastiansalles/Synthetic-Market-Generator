@@ -439,3 +439,24 @@ def test_recalibrate_with_history_window_saves_named_artifact(monkeypatch, tmp_p
     body = resp.json()["profile"]
     assert body["history_years"] == 4.0
     assert body["periods_per_year"] == 365  # registry spec of the BASE asset, not the suffix
+
+
+def test_ensemble_returns_path_matrix_deterministically():
+    req = {"asset": "eurusd", "n_candles": 60, "n_paths": 25, "seed": 4}
+    a = client.post("/ensemble", json=req).json()
+    b = client.post("/ensemble", json=req).json()
+    assert a["n_paths"] == 25 and a["n_candles"] == 60
+    assert len(a["paths"]) == 25 and all(len(p) == 60 for p in a["paths"])
+    assert a["paths"] == b["paths"]  # seeded reproducibility
+    firsts = [p[0] for p in a["paths"]]
+    anchor = client.get("/profiles/eurusd").json()["last_close"]
+    assert all(abs(f / anchor - 1) < 0.02 for f in firsts)  # every path opens at the anchor
+
+
+def test_ensemble_caps_and_shock_metadata():
+    assert client.post("/ensemble", json={"asset": "eurusd", "n_paths": 401}).status_code == 422
+    body = client.post("/ensemble", json={
+        "asset": "eurusd", "n_candles": 100, "n_paths": 10, "preset": "flash_crash",
+    }).json()
+    assert body["shock_at"] == 60
+    assert body["preset"] == "flash_crash"

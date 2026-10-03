@@ -237,3 +237,61 @@ button:disabled {
   background: var(--border);
   border-radius: 4px;
 }
+
+/* ---------- live counter ---------- */
+.live-count {
+  color: var(--bull);
+  font: 600 13px ui-monospace, monospace;
+  border: 1px solid var(--bull);
+  border-radius: 8px;
+  padding: 3px 9px;
+}
+
+/* ---------- toolbar inline fields ---------- */
+.field.inline {
+  margin-top: 0;
+}
+.field.inline input {
+  width: 74px;
+}
+
+/* ---------- ensemble (distribution) view ---------- */
+.ensemble-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ensemble-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.ensemble-stats strong {
+  color: var(--text);
+}
+.ensemble-canvas {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  display: block;
+}
+.ensemble-empty {
+  flex: 1;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  padding: 24px;
+  color: var(--muted);
+  max-width: 520px;
+  margin: 0 auto;
+  text-align: center;
+}
+.ensemble-empty strong {
+  color: var(--accent);
+}

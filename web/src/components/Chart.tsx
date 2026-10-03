@@ -61,7 +61,7 @@ export function Chart() {
       priceHeight,
       live && live.bars.length >= 2 ? live.bars : undefined,
     );
-    const { crosshair } = useStore.getState();
+    const { crosshair, marker } = useStore.getState();
     const crossInfo =
       crosshair && cssW - AXIS_WIDTH > 0
         ? {
@@ -87,6 +87,7 @@ export function Chart() {
       live ? { states: live.states, formingIndex: live.forming ? display.length - 1 : null } : undefined,
       profile,
       crossInfo,
+      marker && marker.index < display.length ? marker : undefined,
     );
   }, []);
 

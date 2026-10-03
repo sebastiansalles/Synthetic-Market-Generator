@@ -73,15 +73,18 @@ export function WorkflowPanel({
           <span className="step">1</span> Market
         </h2>
         <select value={asset} onChange={(e) => setAsset(e.target.value)} disabled={disabled}>
-          {grouped(profiles).map(([base, variants]) => (
-            <optgroup key={base} label={profiles[base]?.display_name ?? base}>
-              {variants.map((v) => (
-                <option key={v.stem} value={v.stem}>
-                  {v.label}
-                </option>
-              ))}
-            </optgroup>
-          ))}
+          {grouped(profiles).map(([base, variants]) => {
+            const name = profiles[base]?.display_name ?? base;
+            return (
+              <optgroup key={base} label={name}>
+                {variants.map((v) => (
+                  <option key={v.stem} value={v.stem}>
+                    {variants.length === 1 ? name : `${name} — ${v.label}`}
+                  </option>
+                ))}
+              </optgroup>
+            );
+          })}
         </select>
         {summary && (
           <p className="hint">
@@ -160,7 +163,7 @@ export function WorkflowPanel({
       </section>
 
       <section>
-        <h2>Drift</h2>
+        <h2>Drift (trend)</h2>
         <div className="seg">
           <button
             className={driftAnnual === null ? "on" : ""}
@@ -179,14 +182,21 @@ export function WorkflowPanel({
         </div>
         {summary && (
           <p className="hint">
+            Drift is the model&rsquo;s average yearly pull — where prices head on
+            balance if you ran infinitely many simulations.{" "}
             {driftAnnual === null ? (
               <>
-                Calibrated: <strong>{pct(summary.drift_ann)}/yr</strong> ± {pct(summary.drift_ann_se)}.
+                Calibrated from this market&rsquo;s own history:{" "}
+                <strong>{pct(summary.drift_ann)}/yr</strong> ± {pct(summary.drift_ann_se)}.
                 {summary.drift_ann_se > Math.abs(summary.drift_ann) / 2 &&
-                  " Barely distinguishable from zero, yet it compounds over the whole run."}
+                  " The data can barely tell this apart from zero — the honest read is: no reliable trend, pure wandering with regime storms."}
               </>
             ) : (
-              <>Trend removed; volatility and regimes are untouched.</>
+              <>
+                Trend removed — paths wander symmetrically around the start price.
+                Volatility, fat tails and regime switching are untouched; this isolates
+                the noise from the drift.
+              </>
             )}
           </p>
         )}
