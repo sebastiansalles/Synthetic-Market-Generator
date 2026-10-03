@@ -47,6 +47,12 @@ interface ChartState {
   setTheme: (t: Theme) => void;
   setMode: (m: AppMode) => void;
   setEnsemble: (e: EnsembleResult | null, busy: boolean) => void;
+  beginEnsemble: (meta: Omit<EnsembleResult, "paths">) => void;
+  appendEnsemblePath: (path: number[]) => void;
+  finishEnsemble: () => void;
+  ensPaths: number;
+  ensCandles: number;
+  setEnsParams: (paths: number, candles: number) => void;
   setMarker: (m: { index: number; label: string } | null) => void;
   setRunKey: (k: string) => void;
 }
@@ -107,10 +113,20 @@ export const useStore = create<ChartState>((set, get) => ({
   mode: "single",
   ensemble: null,
   ensembleBusy: false,
+  ensPaths: 200,
+  ensCandles: 250,
+  setEnsParams: (ensPaths, ensCandles) =>
+    set({ ensPaths, ensCandles, ensemble: null }), // params changed: old result is stale
   marker: null,
   runKey: "",
   setMode: (mode) => set({ mode }),
   setEnsemble: (ensemble, ensembleBusy) => set({ ensemble, ensembleBusy }),
+  beginEnsemble: (meta) => set({ ensemble: { ...meta, paths: [] }, ensembleBusy: true }),
+  appendEnsemblePath: (path) =>
+    set((s) =>
+      s.ensemble ? { ensemble: { ...s.ensemble, paths: [...s.ensemble.paths, path] } } : {},
+    ),
+  finishEnsemble: () => set({ ensembleBusy: false }),
   setMarker: (marker) => set({ marker }),
   setRunKey: (runKey) => set({ runKey }),
   // zooming never fights the live-follow; panning hands control to the user

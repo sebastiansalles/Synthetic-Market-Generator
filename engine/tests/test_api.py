@@ -460,3 +460,30 @@ def test_ensemble_caps_and_shock_metadata():
     }).json()
     assert body["shock_at"] == 60
     assert body["preset"] == "flash_crash"
+
+
+def test_websocket_streams_ensemble_paths_in_order():
+    with client.websocket_connect(
+        "/ws/ensemble?asset=eurusd&seed=2&n_candles=30&n_paths=6"
+    ) as ws:
+        n_start = n_paths = done = 0
+        indices = []
+        meta = {}
+        while True:
+            msg = ws.receive_json()
+            if msg["type"] == "start":
+                n_start += 1
+                meta = msg
+            elif msg["type"] == "path":
+                n_paths += 1
+                indices.append(msg["index"])
+                assert len(msg["path"]) == 30
+            elif msg["type"] == "done":
+                done += 1
+                break
+            else:
+                raise AssertionError(f"unexpected: {msg}")
+    assert n_start == 1 and done == 1 and n_paths == 6
+    assert indices == [0, 1, 2, 3, 4, 5]
+    assert meta["n_paths"] == 6 and meta["n_candles"] == 30
+    assert abs(meta["start_price"] - client.get("/profiles/eurusd").json()["last_close"]) < 1e-6

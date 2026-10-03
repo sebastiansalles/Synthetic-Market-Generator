@@ -75,3 +75,10 @@ export function histogram(values: number[], bins = 28): Histogram {
   }
   return { lo, hi, counts, centers: counts.map((_, b) => lo + (b + 0.5) * width) };
 }
+
+/** Messages from /ws/ensemble — the distribution built in front of you. */
+export type EnsembleWsEvent =
+  | { type: "start"; n_paths: number; n_candles: number; start_price: number; shock_at: number | null; preset: string | null }
+  | { type: "path"; index: number; path: number[] }
+  | { type: "done" }
+  | { type: "error"; message: string };

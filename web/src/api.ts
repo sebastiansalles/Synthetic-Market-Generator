@@ -145,6 +145,29 @@ export async function runEnsemble(params: {
   return resp.json();
 }
 
+/** WebSocket URL for the animated ensemble build (one path at a time). */
+export function ensembleWsUrl(params: {
+  asset: string;
+  nCandles: number;
+  nPaths: number;
+  seed: number;
+  preset: string;
+  startPrice?: number;
+  driftAnnual?: number | null;
+}): string {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const q = new URLSearchParams({
+    asset: params.asset,
+    n_candles: String(params.nCandles),
+    n_paths: String(params.nPaths),
+    seed: String(params.seed),
+  });
+  if (params.preset && params.preset !== "standard") q.set("preset", params.preset);
+  if (params.startPrice) q.set("start_price", String(params.startPrice));
+  if (params.driftAnnual != null) q.set("drift_annual", String(params.driftAnnual));
+  return `${proto}://${location.host}/ws/ensemble?${q}`;
+}
+
 /** Fetch an export and hand it to the browser as a download. Returns the filename
  *  the server chose, so the UI can report what actually landed on disk. */
 export async function exportRun(run: RunSpec, fmt: string): Promise<string> {

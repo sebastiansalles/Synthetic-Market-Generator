@@ -570,3 +570,14 @@ the project, so it needs its own holdout gate, like Phase 1's.
 **Drift copy** rewritten in plain language (average yearly pull; calibrated default with SE; zero = isolate the noise).
 
 **Status**: 116 pytest / 49 vitest; builds clean; live-smoke verified (`/ensemble` matrix + `shock_at` on both endpoints). Uncommitted with the earlier batches.
+
+## Session 18 — 2026-09-21 — Distribution mode builds itself live (user request)
+
+**Done**
+- `WS /ws/ensemble`: streams one path at a time (~50/s, 20 ms pace), same seeded stream as `POST /ensemble` — client watches the distribution being built.
+- `<EnsembleView>` rewritten around the stream: each incoming path sweeps left-to-right (130 ms), the percentile cone (5–95 / 25–75 + median) tightens live, the terminal histogram's bell shape emerges, `building x/N` counter in the stats header, shock marker drawn when a scenario injects one. rAF-driven, store-subscription draw loop.
+- Store: `beginEnsemble/appendEnsemblePath/finishEnsemble`, `ensPaths/ensCandles/setEnsParams` (param change invalidates the old result); App's toolbar inputs bind the store, REST ensemble call removed from App (endpoint kept for tooling/tests).
+- Bug class recorded again: canvas effects must depend on the data that mounts the canvas (the distribution "needed a theme toggle to appear" was the draw effect never re-running after the empty state → canvas mount).
+- Tests: WS ensemble choreography (start → 6 ordered paths → done, anchor check); 117 pytest / 49 vitest; live smoke: 12-path flash-crash stream, shock_at = 36, BTC-anchored.
+
+**Status**: committed as part of the pushed distribution-mode work; this session is the animated-build follow-up.

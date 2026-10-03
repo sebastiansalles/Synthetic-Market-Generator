@@ -411,6 +411,47 @@ class EnsembleIn(BaseModel):
     drift_annual: float | None = None
 
 
+@app.websocket("/ws/ensemble")
+async def ws_ensemble(
+    ws: WebSocket,
+    asset: str,
+    n_candles: int = 250,
+    n_paths: int = 200,
+    seed: int = 0,
+    preset: str | None = None,
+    start_price: float | None = None,
+    drift_annual: float | None = None,
+) -> None:
+    """Stream an ensemble one path at a time, ~50 paths/sec: the client watches the
+    distribution being built — each path sweeps across, the cone tightens live."""
+    await ws.accept()
+    try:
+        profile = _get_profile(asset)
+        scenario = build_scenario(preset, n_candles, profile) if preset else None
+        start = start_price if start_price is not None else profile.last_close
+        mu_states = _drift_override(profile, drift_annual)
+        jumps = scenario.jump_path(n_candles) if scenario else None
+        await ws.send_json({"type": "start", "n_paths": n_paths, "n_candles": n_candles,
+                            "start_price": start,
+                            "shock_at": scenario.jump_at if scenario else None,
+                            "preset": preset})
+        rng = np.random.default_rng(seed)  # one stream: identical to POST /ensemble
+        for i in range(n_paths):
+            states = scenario_states(profile, n_candles, scenario, rng)
+            r, _ = conditional_returns(profile, states, rng, jumps=jumps, mu_states=mu_states)
+            path = np.round(start * np.exp(np.cumsum(r)), 6)
+            await ws.send_json({"type": "path", "index": i, "path": path.tolist()})
+            await asyncio.sleep(0.02)  # the visible build-up pace
+        await ws.send_json({"type": "done"})
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        except (WebSocketDisconnect, RuntimeError):
+            return
+
+
 @app.post("/ensemble")
 def ensemble_endpoint(body: EnsembleIn) -> dict:
     """Simulate n_paths close-price paths over n_candles and return the raw matrix.

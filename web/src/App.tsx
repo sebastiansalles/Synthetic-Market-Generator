@@ -4,7 +4,6 @@ import {
   getWorkflow,
   listProfiles,
   ProfileSummary,
-  runEnsemble,
   simulate,
   WorkflowOptions,
 } from "./api";
@@ -19,8 +18,6 @@ export function App() {
   const [profiles, setProfiles] = useState<Record<string, ProfileSummary>>({});
   const [apiVersion, setApiVersion] = useState<string>("");
   const [options, setOptions] = useState<WorkflowOptions | null>(null);
-  const [ensPaths, setEnsPaths] = useState(200);
-  const [ensCandles, setEnsCandles] = useState(250);
   // per-field selectors, not the whole store: a live session replaces `live` on every
   // tick, and subscribing wholesale would re-render App (and re-run effects) at tick rate
   const asset = useStore((s) => s.asset);
@@ -32,6 +29,8 @@ export function App() {
   const status = useStore((s) => s.status);
   const theme = useStore((s) => s.theme);
   const mode = useStore((s) => s.mode);
+  const ensPaths = useStore((s) => s.ensPaths);
+  const ensCandles = useStore((s) => s.ensCandles);
   const hasBars = useStore((s) => s.bars.length > 0);
   const isLive = useStore((s) => s.live !== null);
   const setAsset = useStore((s) => s.setAsset);
@@ -96,38 +95,6 @@ export function App() {
       .catch((e) => setStatus(`simulation failed: ${e.message}`));
   }, [asset, nCandles, seed, resolution, preset, driftAnnual, isLive, mode, hasBars, runKey, setBars, setStatus]);
 
-  // ensemble mode: recompute when the store-linked inputs change (paths/candles rerun manually)
-  useEffect(() => {
-    if (mode !== "ensemble" || !asset) return;
-    let cancelled = false;
-    const s = useStore.getState();
-    s.setEnsemble(null, true);
-    setStatus(`computing ${ensPaths} paths × ${ensCandles} candles…`);
-    runEnsemble({
-      asset,
-      nCandles: ensCandles,
-      nPaths: ensPaths,
-      seed,
-      preset,
-      startPrice: profilesRef.current[asset]?.last_close,
-      driftAnnual,
-    })
-      .then((result) => {
-        if (cancelled) return;
-        useStore.getState().setEnsemble(result, false);
-        setStatus(`${result.n_paths} paths · seed ${seed}`);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        useStore.getState().setEnsemble(null, false);
-        setStatus(`ensemble failed: ${(e as Error).message}`);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, asset, seed, preset, driftAnnual]);
-
   const startLive = () => {
     const s = useStore.getState();
     s.startLive();
@@ -177,7 +144,12 @@ export function App() {
                 min={10}
                 max={400}
                 value={ensPaths}
-                onChange={(e) => setEnsPaths(Math.max(10, Math.min(400, Number(e.target.value) || 10)))}
+                onChange={(e) =>
+                  useStore.getState().setEnsParams(
+                    Math.max(10, Math.min(400, Number(e.target.value) || 10)),
+                    ensCandles,
+                  )
+                }
               />
             </label>
             <label className="field inline">
@@ -187,7 +159,12 @@ export function App() {
                 min={10}
                 max={2000}
                 value={ensCandles}
-                onChange={(e) => setEnsCandles(Math.max(10, Math.min(2000, Number(e.target.value) || 10)))}
+                onChange={(e) =>
+                  useStore.getState().setEnsParams(
+                    ensPaths,
+                    Math.max(10, Math.min(2000, Number(e.target.value) || 10)),
+                  )
+                }
               />
             </label>
           </>
