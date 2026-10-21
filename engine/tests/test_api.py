@@ -637,3 +637,60 @@ def test_validation_families_endpoint_describes_the_metric_groups():
     assert keys[0] == "returns"
     assert "clustering" in keys and "candles" in keys
     assert all(f["label"] and f["blurb"] for f in body["families"])
+
+
+def test_conditional_endpoint_reports_today_against_the_unconditional_level():
+    body = client.get("/profiles/eurusd/conditional").json()
+    assert body["asset"] == "eurusd"
+    assert body["n_bars"] > 1000
+    assert len(body["state_probs"]) == 2
+    assert abs(sum(body["state_probs"]) - 1.0) < 1e-9
+    assert abs(sum(body["stationary"]) - 1.0) < 1e-9
+    assert body["ann_vol"] > 0 and body["uncond_ann_vol"] > 0
+    assert body["vol_ratio"] == pytest.approx(body["ann_vol"] / body["uncond_ann_vol"])
+    assert body["periods_per_year"] == 252
+    assert body["last_date"] is not None
+
+
+def test_conditional_endpoint_is_era_aware():
+    """An era profile must be filtered on its own window — the same rule the
+    validation suite follows. Different window, different conditional state."""
+    full = client.get("/profiles/btcusd/conditional").json()
+    era = client.get("/profiles/btcusd_last3y/conditional").json()
+    assert era["n_bars"] < full["n_bars"]
+    assert era["uncond_ann_vol"] != full["uncond_ann_vol"]
+
+
+def test_conditional_endpoint_404s_for_unknown_profile():
+    assert client.get("/profiles/nope/conditional").status_code == 404
+
+
+def test_conditioned_ensemble_differs_from_the_unconditional_one():
+    """Same seed, same everything else: only the opening regime and variance change.
+    If these matched, the conditioning would not be reaching the generator."""
+    req = {"asset": "eurusd", "n_candles": 60, "n_paths": 30, "seed": 9}
+    plain = client.post("/ensemble", json=req).json()
+    cond = client.post("/ensemble", json={**req, "condition": True}).json()
+    assert plain["conditioned"] is False
+    assert cond["conditioned"] is True
+    assert cond["paths"] != plain["paths"]
+    assert cond["paths"] == client.post("/ensemble", json={**req, "condition": True}).json()["paths"]
+
+
+def test_conditioned_ensemble_opens_at_the_conditional_dispersion():
+    """EUR/USD's conditional vol is well below its unconditional level, so a
+    conditioned ensemble must fan out more slowly over the first bars. Measured on
+    the cross-sectional spread of the first 5 bars, where the seeding still bites."""
+    req = {"asset": "eurusd", "n_candles": 120, "n_paths": 200, "seed": 3}
+    plain = np.array(client.post("/ensemble", json=req).json()["paths"])
+    cond = np.array(client.post("/ensemble", json={**req, "condition": True}).json()["paths"])
+    spread = lambda m: float(np.std(np.log(m[:, :5] / m[:, :1]), axis=0).mean())
+    assert spread(cond) < spread(plain)
+
+
+def test_websocket_ensemble_reports_conditioning():
+    with client.websocket_connect(
+        "/ws/ensemble?asset=eurusd&seed=2&n_candles=20&n_paths=3&condition=true"
+    ) as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "start" and msg["conditioned"] is True

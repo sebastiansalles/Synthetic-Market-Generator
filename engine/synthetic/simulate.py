@@ -119,9 +119,14 @@ def _drift_override(profile: AssetProfile, drift_annual: float | None) -> np.nda
     return shift_state_drift(profile, drift_annual / profile.periods_per_year)
 
 
-def scenario_states(profile: AssetProfile, n: int, scenario: Scenario | None, rng) -> np.ndarray:
-    """Regime path, with optional forced stretch at the beginning."""
-    states = simulate_regimes(profile.hmm, n, rng)
+def scenario_states(profile: AssetProfile, n: int, scenario: Scenario | None, rng,
+                    start_probs: np.ndarray | None = None) -> np.ndarray:
+    """Regime path, with optional forced stretch at the beginning.
+
+    `start_probs` is forwarded to `simulate_regimes` so a conditional forecast can
+    open from today's filtered regime probabilities. A scenario overrides the
+    opening anyway — it forces its own stretch — so the two never fight."""
+    states = simulate_regimes(profile.hmm, n, rng, start_probs=start_probs)
     if scenario is None:
         return states
     n_forced = min(scenario.n_candles, n)

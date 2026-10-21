@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { ensembleWsUrl, ProfileSummary } from "../api";
+import { EnsembleRisk } from "./EnsembleRisk";
 import {
   EnsembleResult,
   EnsembleWsEvent,
@@ -23,6 +24,39 @@ interface Sweep {
   t0: number;
 }
 
+/** The percentile cone and the price extent, recomputed on a budget.
+ *
+ *  Both are O(paths x candles) — the cone sorts every path at every time step —
+ *  and drawing runs at animation rate, so computing them per frame burned the
+ *  whole frame on work whose answer barely moves between paths. `BAND_RECOMPUTE_MS`
+ *  has always been declared for this; now it is honoured. A settled ensemble keeps
+ *  the same `paths` array identity, so it recomputes exactly once. */
+interface Derived {
+  bands: number[][];
+  lo: number;
+  hi: number;
+}
+
+function deriveFan(paths: number[][], startPrice: number): Derived {
+  const bands = QUANTILES.map((q) => percentileBand(paths, q));
+  let lo = Infinity;
+  let hi = -Infinity;
+  // an explicit loop, not Math.min(...paths.flat()): at the permitted maximum of
+  // 400 paths x 2000 candles that spread is 800k arguments, well past V8's
+  // call-stack limit, and the view threw RangeError instead of rendering
+  for (const path of paths) {
+    for (const price of path) {
+      if (price < lo) lo = price;
+      if (price > hi) hi = price;
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+    lo = startPrice * 0.9;
+    hi = startPrice * 1.1;
+  }
+  return { bands, lo, hi };
+}
+
 function drawEnsemble(
   ctx: CanvasRenderingContext2D,
   data: EnsembleResult,
@@ -31,6 +65,7 @@ function drawEnsemble(
   theme: (typeof THEMES)["dark" | "light"],
   sweeps: Sweep[],
   now: number,
+  derived: Derived,
 ) {
   const histW = Math.min(190, Math.round(width * 0.22));
   const fanW = width - histW - 8;
@@ -40,14 +75,15 @@ function drawEnsemble(
   ctx.fillStyle = theme.bg;
   ctx.fillRect(0, 0, width, height);
 
-  const bands = QUANTILES.map((q) => percentileBand(data.paths, q));
+  const { bands } = derived;
   const complete = data.paths.length;
-  const loSource = complete > 0 ? data.paths.flat() : [data.start_price * 0.9, data.start_price * 1.1];
-  let lo = Math.min(...loSource);
-  let hi = Math.max(...loSource);
+  let lo = derived.lo;
+  let hi = derived.hi;
   for (const s of sweeps) {
-    lo = Math.min(lo, ...s.path);
-    hi = Math.max(hi, ...s.path);
+    for (const price of s.path) {
+      if (price < lo) lo = price;
+      if (price > hi) hi = price;
+    }
   }
   lo = Math.exp(Math.log(lo) - 0.04 * (Math.log(hi) - Math.log(lo)));
   hi = Math.exp(Math.log(hi) + 0.04 * (Math.log(hi) - Math.log(lo)));
@@ -168,8 +204,10 @@ export function EnsembleView({ summary }: { summary: ProfileSummary | undefined 
   const driftAnnual = useStore((s) => s.driftAnnual);
   const ensPaths = useStore((s) => s.ensPaths);
   const ensCandles = useStore((s) => s.ensCandles);
+  const ensCondition = useStore((s) => s.ensCondition);
   const sweepsRef = useRef<Sweep[]>([]);
   const rafRef = useRef(0);
+  const derivedRef = useRef<{ paths: number[][]; at: number; value: Derived } | null>(null);
 
   // stream the build: one path at a time over the websocket
   useEffect(() => {
@@ -183,6 +221,7 @@ export function EnsembleView({ summary }: { summary: ProfileSummary | undefined 
         preset,
         startPrice: summary?.last_close,
         driftAnnual,
+        condition: ensCondition,
       }),
     );
     ws.onmessage = (e) => {
@@ -195,6 +234,7 @@ export function EnsembleView({ summary }: { summary: ProfileSummary | undefined 
           start_price: ev.start_price,
           shock_at: ev.shock_at,
           preset: ev.preset,
+          conditioned: ev.conditioned ?? false,
         });
         st.setStatus(`building distribution · 0/${ev.n_paths}`);
       } else if (ev.type === "path") {
@@ -210,9 +250,12 @@ export function EnsembleView({ summary }: { summary: ProfileSummary | undefined 
         st.setStatus(`ensemble failed: ${ev.message}`);
       }
     };
-    return () => ws.close();
+    return () => {
+      derivedRef.current = null; // a new ensemble must not reuse the old cone
+      ws.close();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asset, seed, preset, driftAnnual, ensPaths, ensCandles]);
+  }, [asset, seed, preset, driftAnnual, ensPaths, ensCandles, ensCondition]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -231,7 +274,21 @@ export function EnsembleView({ summary }: { summary: ProfileSummary | undefined 
 
     const now = performance.now();
     sweepsRef.current = sweepsRef.current.filter((s) => now - s.t0 < SWEEP_MS);
-    drawEnsemble(ctx, data, cssW, cssH, THEMES[useStore.getState().theme], sweepsRef.current, now);
+
+    // reuse the cone when nothing arrived (same array identity), or when the last
+    // recompute is still inside the budget and this is a later state of the same run
+    const cache = derivedRef.current;
+    const fresh =
+      cache &&
+      (cache.paths === data.paths ||
+        (now - cache.at < BAND_RECOMPUTE_MS && data.paths.length > cache.paths.length));
+    const derived = fresh
+      ? cache!.value
+      : deriveFan(data.paths, data.start_price);
+    if (!fresh) derivedRef.current = { paths: data.paths, at: now, value: derived };
+
+    drawEnsemble(ctx, data, cssW, cssH, THEMES[useStore.getState().theme],
+                 sweepsRef.current, now, derived);
 
     // keep animating while paths are sweeping in
     if (sweepsRef.current.length > 0 || useStore.getState().ensembleBusy) {
@@ -253,14 +310,22 @@ export function EnsembleView({ summary }: { summary: ProfileSummary | undefined 
     // `ensemble`: the empty state renders no canvas — re-run when data arrives
   }, [draw, ensemble]);
 
+  // The risk panel stays mounted with no ensemble on purpose: switching the forecast
+  // origin clears the old result, and a control that unmounts itself the moment you
+  // click it is unusable. Its own controls read the profile, not the paths.
   if (!ensemble) {
     return (
-      <div className="ensemble-empty">
-        <p>
-          The distribution view <strong>builds itself in front of you</strong> — hundreds of
-          seeded paths sweep across the canvas, the cone tightening until the answer
-          emerges.
-        </p>
+      <div className="ensemble-wrap">
+        <div className="ensemble-body">
+          <div className="ensemble-empty">
+            <p>
+              The distribution view <strong>builds itself in front of you</strong> — hundreds
+              of seeded paths sweep across the canvas, the cone tightening until the answer
+              emerges.
+            </p>
+          </div>
+          <EnsembleRisk summary={summary} />
+        </div>
       </div>
     );
   }
@@ -279,7 +344,8 @@ export function EnsembleView({ summary }: { summary: ProfileSummary | undefined 
           {summary ? ` · ${summary.display_name}` : ""}
           {ensemble.preset ? ` · ${ensemble.preset}` : ""}
         </span>
-        {!building && (
+        {ensemble.conditioned && <span className="badge">from today</span>}
+        {ensemble.paths.length > 1 && (
           <>
             <span>
               median end <strong>{fmt(stats.median)}</strong> (
@@ -300,7 +366,10 @@ export function EnsembleView({ summary }: { summary: ProfileSummary | undefined 
           </>
         )}
       </div>
-      <canvas ref={canvasRef} className="ensemble-canvas" />
+      <div className="ensemble-body">
+        <canvas ref={canvasRef} className="ensemble-canvas" />
+        <EnsembleRisk summary={summary} />
+      </div>
     </div>
   );
 }

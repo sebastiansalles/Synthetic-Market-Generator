@@ -391,10 +391,38 @@ def fit_hmm_regimes(r: pd.Series, n_states: int = 2, n_init: int = 10, seed: int
     )
 
 
-def simulate_regimes(regimes: HMMRegimes, n: int, rng) -> np.ndarray:
-    """Sample a state path of length n from the fitted Markov chain."""
+def simulate_regimes(regimes: HMMRegimes, n: int, rng,
+                     start_probs: np.ndarray | None = None) -> np.ndarray:
+    """Sample a state path of length n from the fitted Markov chain.
+
+    The opening state is drawn from the chain's **stationary** distribution, not
+    from `regimes.start_probs`. `start_probs` is the fitted distribution of the
+    *sample's first bar* — a nuisance parameter of the HMM fit, pinned to whatever
+    regime happened to prevail decades ago — and sampling it biased the opening of
+    every simulated path. EUR/USD's is 83% turbulent against a 19% long-run share,
+    so paths used to open in the turbulent state five times too often and needed
+    ~60 bars to mix back; over a 250-bar forecast that is the first quarter spent
+    reading an artifact of the fit. Long calibration runs were barely affected
+    (thousands of bars swamp the opening), which is why the bug survived: it
+    distorts exactly the short horizons a forecast cares about.
+
+    `start_probs` overrides the opening distribution — this is how a conditional
+    forecast opens from today's filtered regime probabilities instead of the
+    long-run shares. See `synthetic.forecast.state_filter`.
+    """
+    p0 = regimes.stationary if start_probs is None else np.asarray(start_probs, dtype=float)
+    # `stationary` comes out of np.linalg.eig, so a near-absorbing state can carry a
+    # tiny negative component as float noise — and rng.choice rejects any negative
+    # outright ("Probabilities are not non-negative"), which would crash every
+    # simulation for that profile rather than degrade. Clip before normalizing; this
+    # also sanitizes a caller-supplied override.
+    p0 = np.clip(p0, 0.0, None)
+    total = p0.sum()
+    if not total > 0:
+        p0 = np.full(regimes.n_states, 1.0 / regimes.n_states)
+        total = 1.0
     states = np.empty(n, dtype=int)
-    states[0] = rng.choice(regimes.n_states, p=regimes.start_probs)
+    states[0] = rng.choice(regimes.n_states, p=p0 / total)
     cumulative = np.cumsum(regimes.transition, axis=1)
     draws = rng.random(n)
     for t in range(1, n):
@@ -647,7 +675,8 @@ def shift_state_drift(profile: AssetProfile, target_per_period: float) -> np.nda
 
 def conditional_returns(profile: AssetProfile, states: np.ndarray, rng,
                         jumps: np.ndarray | None = None,
-                        mu_states: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+                        mu_states: np.ndarray | None = None,
+                        h0: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Per-state GARCH(1,1)-t returns for a GIVEN regime path; also returns the
     conditional variance path h (the OHLC bridge needs it). Variance re-initializes
     at the new state's unconditional level on every regime switch.
@@ -655,7 +684,13 @@ def conditional_returns(profile: AssetProfile, states: np.ndarray, rng,
     `jumps` (log-return shocks, one per candle, mostly zero) enters the innovation
     BEFORE the variance update, so a shock propagates into the GARCH recursion and
     the model produces its own aftershock volatility. Adding the shock to the
-    returned series afterwards would give a crash with an implausibly calm sequel."""
+    returned series afterwards would give a crash with an implausibly calm sequel.
+
+    `h0` opens the recursion at a given variance instead of the first state's
+    unconditional level — how a conditional forecast starts from today's filtered
+    variance. It decays out of the path at the GARCH persistence and is discarded
+    outright by the first regime switch, which is the honest behaviour: conditioning
+    information has a shelf life and the model should not pretend otherwise."""
     n = len(states)
     g = [_sim_safe_garch(x) for x in profile.state_garch]
     by_state = np.array([x["mu"] for x in g]) if mu_states is None else np.asarray(mu_states, float)
@@ -672,7 +707,7 @@ def conditional_returns(profile: AssetProfile, states: np.ndarray, rng,
         raise ValueError(f"jumps has length {len(shock)}, expected {n}")
     r = np.empty(n)
     h_path = np.empty(n)
-    h = uncond[0]
+    h = uncond[0] if h0 is None else float(h0)
     prev = states[0]
     for t in range(n):
         if states[t] != prev:

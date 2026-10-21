@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from synthetic.calibration import AssetProfile, calibrate, calibrated_drift, era_window
 from synthetic.data import DEFAULT_PROCESSED_DIR
+from synthetic.forecast import conditional_state
 from synthetic.export import (
     RESOLUTIONS,
     ExportManifest,
@@ -349,7 +350,10 @@ def recalibrate(asset: str, seed: int = Query(default=0),
 
 VALIDATION_SIMS = 200
 VALIDATION_SEED = 101
-_VALIDATION_FORMAT = 2  # bump to invalidate every cached artifact on disk
+_VALIDATION_FORMAT = 3  # bump to invalidate every cached artifact on disk
+# 3: simulate_regimes opens from the stationary distribution instead of start_probs.
+#    The digest is taken over the profile pickle, which did NOT change — only the
+#    generator did — so nothing but this constant can invalidate the old reports.
 
 _validation_jobs: dict[str, str] = {}  # stem -> "running" or an error message
 _validation_lock = threading.Lock()
@@ -555,6 +559,32 @@ class EnsembleIn(BaseModel):
     scenario: ScenarioIn | None = None  # explicit form; preset wins (same as /simulate)
     start_price: float | None = Field(default=None)
     drift_annual: float | None = None
+    condition: bool = False  # open paths from today's filtered regime + variance
+
+
+def _conditioning(profile: AssetProfile, condition: bool) -> tuple:
+    """Where a forecast should open: today's regime distribution and variance, or
+    `(None, None)` for the unconditional ensemble.
+
+    Filtering the whole history costs a single pass and runs in milliseconds, so
+    this is computed per request rather than cached — and must be, since it changes
+    the moment new bars land."""
+    if not condition:
+        return None, None
+    state = conditional_state(profile, _real_frame(profile))
+    return state.state_probs, state.h
+
+
+@app.get("/profiles/{asset}/conditional")
+def profile_conditional(asset: str) -> dict:
+    """Today's regime probabilities and conditional volatility for one profile.
+
+    This is the difference between "what does this asset look like in general" and
+    "what does it look like from here" — compare `ann_vol` against
+    `uncond_ann_vol`. They can agree, and reporting both is the only way to tell
+    whether conditioning bites for a given asset on a given day."""
+    profile = _get_profile(asset)
+    return conditional_state(profile, _real_frame(profile)).as_dict()
 
 
 @app.websocket("/ws/ensemble")
@@ -567,6 +597,7 @@ async def ws_ensemble(
     preset: str | None = None,
     start_price: float | None = None,
     drift_annual: float | None = None,
+    condition: bool = False,
 ) -> None:
     """Stream an ensemble one path at a time, ~50 paths/sec: the client watches the
     distribution being built — each path sweeps across, the cone tightens live."""
@@ -577,14 +608,17 @@ async def ws_ensemble(
         start = start_price if start_price is not None else profile.last_close
         mu_states = _drift_override(profile, drift_annual)
         jumps = scenario.jump_path(n_candles) if scenario else None
+        start_probs, h0 = _conditioning(profile, condition)
         await ws.send_json({"type": "start", "n_paths": n_paths, "n_candles": n_candles,
                             "start_price": start,
                             "shock_at": scenario.jump_at if scenario else None,
-                            "preset": preset})
+                            "preset": preset, "conditioned": condition})
         rng = np.random.default_rng(seed)  # one stream: identical to POST /ensemble
         for i in range(n_paths):
-            states = scenario_states(profile, n_candles, scenario, rng)
-            r, _ = conditional_returns(profile, states, rng, jumps=jumps, mu_states=mu_states)
+            states = scenario_states(profile, n_candles, scenario, rng,
+                                     start_probs=start_probs)
+            r, _ = conditional_returns(profile, states, rng, jumps=jumps,
+                                       mu_states=mu_states, h0=h0)
             path = np.round(start * np.exp(np.cumsum(r)), 6)
             await ws.send_json({"type": "path", "index": i, "path": path.tolist()})
             await asyncio.sleep(0.02)  # the visible build-up pace
@@ -611,18 +645,21 @@ def ensemble_endpoint(body: EnsembleIn) -> dict:
     start_price = body.start_price if body.start_price is not None else profile.last_close
     mu_states = _drift_override(profile, body.drift_annual)
     jumps = scenario.jump_path(body.n_candles) if scenario else None
+    start_probs, h0 = _conditioning(profile, body.condition)
 
     rng = np.random.default_rng(body.seed)  # one stream: fully deterministic
     paths = np.empty((body.n_paths, body.n_candles))
     for i in range(body.n_paths):
-        states = scenario_states(profile, body.n_candles, scenario, rng)
-        r, _ = conditional_returns(profile, states, rng, jumps=jumps, mu_states=mu_states)
+        states = scenario_states(profile, body.n_candles, scenario, rng,
+                                 start_probs=start_probs)
+        r, _ = conditional_returns(profile, states, rng, jumps=jumps,
+                                   mu_states=mu_states, h0=h0)
         paths[i] = start_price * np.exp(np.cumsum(r))
 
     return {"asset": body.asset, "seed": body.seed, "n_paths": body.n_paths,
             "n_candles": body.n_candles, "start_price": start_price,
             "shock_at": scenario.jump_at if scenario and scenario.jump_at is not None else None,
-            "preset": body.preset,
+            "preset": body.preset, "conditioned": body.condition,
             "paths": np.round(paths, 6).tolist()}
 
 

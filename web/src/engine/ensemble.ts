@@ -8,6 +8,9 @@ export interface EnsembleResult {
   start_price: number;
   shock_at: number | null;
   preset: string | null;
+  /** True when the paths opened from today's filtered regime + variance rather
+   *  than the chain's long-run shares. */
+  conditioned?: boolean;
   paths: number[][]; // [path][candle] close prices
 }
 
@@ -78,7 +81,7 @@ export function histogram(values: number[], bins = 28): Histogram {
 
 /** Messages from /ws/ensemble — the distribution built in front of you. */
 export type EnsembleWsEvent =
-  | { type: "start"; n_paths: number; n_candles: number; start_price: number; shock_at: number | null; preset: string | null }
+  | { type: "start"; n_paths: number; n_candles: number; start_price: number; shock_at: number | null; preset: string | null; conditioned?: boolean }
   | { type: "path"; index: number; path: number[] }
   | { type: "done" }
   | { type: "error"; message: string };

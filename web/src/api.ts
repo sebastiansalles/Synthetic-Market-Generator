@@ -136,6 +136,27 @@ export async function simulate(run: RunSpec): Promise<SimulationResult> {
   };
 }
 
+/** Where a forecast should open: today's filtered regime probabilities and
+ *  conditional volatility, against the unconditional level for comparison. */
+export interface ConditionalState {
+  asset: string;
+  n_bars: number;
+  last_date: string | null;
+  state_probs: number[];
+  stationary: number[];
+  h: number;
+  ann_vol: number;
+  uncond_ann_vol: number;
+  vol_ratio: number;
+  periods_per_year: number;
+}
+
+export async function getConditional(asset: string): Promise<ConditionalState> {
+  const resp = await fetch(`/profiles/${encodeURIComponent(asset)}/conditional`);
+  if (!resp.ok) throw new Error(`/conditional: ${resp.status}`);
+  return resp.json();
+}
+
 /** Many paths over N candles — the ensemble behind the distribution view. */
 export async function runEnsemble(params: {
   asset: string;
@@ -145,6 +166,7 @@ export async function runEnsemble(params: {
   preset: string;
   startPrice?: number;
   driftAnnual?: number | null;
+  condition?: boolean;
 }): Promise<import("./engine/ensemble").EnsembleResult> {
   const resp = await fetch("/ensemble", {
     method: "POST",
@@ -157,6 +179,7 @@ export async function runEnsemble(params: {
       preset: params.preset === "standard" ? null : params.preset,
       start_price: params.startPrice ?? null,
       drift_annual: params.driftAnnual ?? null,
+      condition: params.condition ?? false,
     }),
   });
   if (!resp.ok) throw new Error(`/ensemble: ${resp.status}`);
@@ -172,6 +195,7 @@ export function ensembleWsUrl(params: {
   preset: string;
   startPrice?: number;
   driftAnnual?: number | null;
+  condition?: boolean;
 }): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const q = new URLSearchParams({
@@ -183,6 +207,7 @@ export function ensembleWsUrl(params: {
   if (params.preset && params.preset !== "standard") q.set("preset", params.preset);
   if (params.startPrice) q.set("start_price", String(params.startPrice));
   if (params.driftAnnual != null) q.set("drift_annual", String(params.driftAnnual));
+  if (params.condition) q.set("condition", "true");
   return `${proto}://${location.host}/ws/ensemble?${q}`;
 }
 

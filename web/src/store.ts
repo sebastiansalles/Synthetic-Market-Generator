@@ -53,7 +53,11 @@ interface ChartState {
   finishEnsemble: () => void;
   ensPaths: number;
   ensCandles: number;
+  /** Whether the distribution opens from today's filtered regime + variance
+   *  instead of the chain's long-run shares. */
+  ensCondition: boolean;
   setEnsParams: (paths: number, candles: number) => void;
+  setEnsCondition: (on: boolean) => void;
   setMarker: (m: { index: number; label: string } | null) => void;
   setRunKey: (k: string) => void;
 }
@@ -119,8 +123,10 @@ export const useStore = create<ChartState>((set, get) => ({
   ensembleBusy: false,
   ensPaths: 200,
   ensCandles: 250,
+  ensCondition: false,
   setEnsParams: (ensPaths, ensCandles) =>
     set({ ensPaths, ensCandles, ensemble: null }), // params changed: old result is stale
+  setEnsCondition: (ensCondition) => set({ ensCondition, ensemble: null }),
   marker: null,
   runKey: "",
   setMode: (mode) => set({ mode }),

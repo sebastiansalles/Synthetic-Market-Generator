@@ -74,22 +74,154 @@ BTC could be, conditional on volatility regimes, and is that distribution
 empirically honest?" — this engine answers, and the answer compounds in value with
 every asset and every validated scenario.
 
-## 4. The testable frontier (what would change this verdict)
+## 4. The frontier, measured
 
-| Claim | Test | Expected outcome (and why) |
-|---|---|---|
-| Ensemble mean predicts price | Correlate mean seeded path with next-year realized | Fails for EUR (drift unidentified); ~drift line only for gold/BTC |
-| Regime state has directional information | Conditional next-bar return by state | Small negative (turbulence ≈ drawdowns); magnitude within noise |
-| Volatility is predictable | GARCH forecast vs realized vol | **Passes** — this is the engine's genuine edge |
-| Converged distribution = realized distribution | Rolling holdout gates (Phase 1/2/era studies) | Passes per asset/era window while it stays calibrated |
+§1–3 were an argument. This section is the experiment, run on the real series in
+this repo. Every number below is reproducible from `synthetic.forecast` plus the
+committed parquet; the method notes at the end say how, and where the traps are.
 
-## 5. Verdict
+### Volatility is forecastable — but barely better than a moving average
 
-The theory is half right, and the half that's right is the valuable half.
-Simulations **do** converge — to the model's distribution, which this project
-demonstrates can be made empirically real. That makes the tool a **predictor of
-distributions, regimes, and risk** — a risk oracle — not a crystal ball for prices.
-The gem is real; it is probabilistic, and it is already in the repo, gated and
-documented. The price-prediction version of the gem would require markets to be
-predictable and stationary — and the project's own analyses are the evidence that
-they are neither.
+Mincer–Zarnowitz R², forecasting the next 20 bars' **log realized variance**:
+
+| profile | engine, causal | trailing-20 var | engine, Viterbi |
+|---|---|---|---|
+| eurusd | **0.557** | 0.497 | 0.596 |
+| xauusd | **0.319** | 0.307 | 0.434 |
+| btcusd | 0.137 | **0.196** | 0.224 |
+| btcusd_last4y | 0.027 | 0.025 | 0.018 |
+
+Three readings, in descending order of importance:
+
+**The hindsight premium is most of the apparent edge.** The third column drives the
+variance filter off the Viterbi path, which decodes the *entire* series — so the
+state at bar `t` knows about bar `t+500`. It is not a forecast, and the gap between
+columns one and three is the size of the self-deception. Any backtest that decodes
+regimes over the full history before trading them is reading this column.
+
+**Causally, the engine does not reliably beat a 20-bar moving average of squared
+returns.** It wins on EUR/USD (0.557 vs 0.497) and ties on gold, and it *loses* on
+BTC. A regime-switching GARCH-t with Student-t innovations, fitted by MLE, is
+roughly level with the crudest estimator in the field. This is not a defect in the
+fit; it is what volatility forecasting is like.
+
+**Era-weighting destroys the vol-timing signal.** `btcusd_last4y` scores ~0.02, and
+so does its baseline — there is little forecastable vol *variation* left inside a
+homogeneous recent window. Distributional honesty and vol timing pull in opposite
+directions: use the era window for scenario realism and full history for sizing.
+
+### Position sizing beats regime timing, and both beat direction
+
+Causal vol targeting (`weight = median(h) / sqrt(h_t)`, capped at 3x) and regime
+gating, applied to the next bar's return, no costs:
+
+| asset | buy & hold | vol targeted | regime gated | trailing-20 targeted |
+|---|---|---|---|---|
+| eurusd | −0.01 | −0.01 | −0.01 | 0.01 |
+| xauusd | 0.54 | 0.63 | 0.63 | **0.67** |
+| btcusd | 0.69 | 0.79 | 0.73 | 0.82 |
+
+Sharpe, full history. Vol targeting improves on buy & hold where there is a return
+to harvest, and it does so the *right* way — gold's gain is a 14% volatility
+reduction, not a return increase. But the trailing-20 estimator does it as well or
+better, which is the same verdict as the forecast table.
+
+Regime gating is the weaker expression of the same signal and costs 5–20x the
+turnover (BTC flips 65 times a year), so it is dominated once costs exist at all.
+
+**EUR/USD staying flat is a confirmation, not a failure.** Phase 1 found its drift
+unidentified (±2pp/yr); vol targeting cannot manufacture return where there is none
+to scale. A method that "worked" there would be the result to distrust.
+
+### Conditioning has a shelf life, and it is the dwell time
+
+Opening a forecast from today's filtered regime and variance (`condition=true` on
+`/ensemble`) is only worth something for as long as the chain remembers. Variance
+is discarded by the first regime switch, so the horizon over which a conditioned
+forecast differs from an unconditional one is the asset's dwell time:
+
+| asset | dwell (days) | median bars to 1st switch | chain mixing time |
+|---|---|---|---|
+| eurusd | 104 / 24 | **56** | 66 |
+| xauusd | 59 / 17 | 31 | 31 |
+| btcusd | 11 / 4 | 6 | 10 |
+| btcusd_last3y | 5 / 2 | **3** | 2 |
+
+Measured on the opening spread of 300 paths, EUR/USD narrows from 0.0071 to 0.0040
+over the first five bars — tracking its 0.54x conditional/unconditional vol ratio —
+while `btcusd_last3y` does not move at all despite a comparable 0.57x ratio,
+because it has already switched regime by bar three.
+
+Two consequences. Conditioning is worth far more on FX and gold than on crypto. And
+the same timescale governed the `start_probs` defect this phase fixed: both the
+severity of that bug and the value of this feature scale with dwell time, because
+both are questions about how long the chain's opening state survives.
+
+### What this does and does not license
+
+| Claim | Verdict |
+|---|---|
+| Ensemble mean predicts price | **No.** Converges to the calibrated drift line; unidentified for EUR/USD |
+| Regime state carries directional information | **Not usefully.** Real but dominated by sizing, and eaten by turnover |
+| Volatility is predictable | **Yes, weakly.** R² 0.14–0.56 causally, roughly level with a 20-bar moving average |
+| The engine's vol forecast beats a trivial one | **Not reliably.** Wins on EUR/USD, ties on gold, loses on BTC |
+| Converged distribution = realized distribution | **Yes, per asset/era**, while it stays calibrated — the validation suite is this gate |
+| First-passage and tail quantities | **Yes, and uniquely.** No closed form exists under this model; the ensemble is the only instrument |
+
+### Method notes (the traps)
+
+- **Causality.** `forecast.state_filter` is a Hamilton filter: row `t` sees only
+  bars before `t`. `HMMRegimes.posterior` (forward–backward) and `state_path`
+  (Viterbi) both condition on the whole series and must never drive a backtest.
+- **Variance carries across switches** in the filter (`reinit=False`) even though
+  the *generator* resets on every switch. The generator knows its regime path
+  exactly; a filter only estimates it, and resetting on a misclassified switch
+  discards real information. Measured: R² 0.557 carried vs 0.407 reset.
+- **Everything above is in-sample on parameters.** The profiles were fitted on the
+  same history the strategies trade. The causal filter removes lookahead *within*
+  the filter, not *parameter* lookahead. Expanding-window refits are the next gate
+  and nothing here should be believed at face value until they run.
+- **No transaction costs**, so every turnover figure is a liability the Sharpes do
+  not yet pay.
+
+## 5. The actual gem, restated precisely
+
+The distributional claim survives the measurements; the forecasting claim comes out
+much weaker than §3 asserted. That shifts where the value is, and it is worth being
+exact about the destination.
+
+The engine is not a better volatility forecaster than a moving average, and it is
+not a price predictor at all. What it is — uniquely, with no closed-form
+competitor — is a machine for **path-dependent questions under realistic
+dynamics**:
+
+- *What is the chance my stop is hit before my target, within 60 bars, starting
+  from today's regime and volatility?*
+- *What is the distribution of max drawdown over the next year — not the average
+  path's, the 95th percentile path's?*
+- *What is expected shortfall at 1%, under fat tails and volatility clustering
+  rather than a lognormal guide?*
+
+These have no analytic answer once you add regime switching, GARCH persistence and
+Student-t innovations. Barrier probabilities under plain GBM are a textbook
+formula; under *this* model, simulation is the only route. And unlike a price
+forecast, each one is a question the model is actually entitled to answer, because
+each is a property of the distribution the validation suite gates.
+
+That is the gem, and it is narrower and more defensible than "the simulations
+converge to a prediction": **the ensemble prices position risk, conditional on
+today, under dynamics that pass empirical gates.** Risk desks pay for exactly this.
+`web/src/engine/risk.ts` computes it and the distribution view shows it.
+
+## 6. Verdict
+
+The theory is half right, and the half that is right is the valuable half —
+though not for the reason §3 originally gave. Simulations **do** converge, to the
+model's distribution, which this project demonstrates can be made empirically
+real. The conditional machinery now exists to start that distribution from today
+rather than from the long run. But the forecasting edge over trivial estimators is
+thin to absent, and the measurements above are the evidence.
+
+So: a **predictor of distributions, regimes and position risk** — a risk oracle —
+not a crystal ball for prices, and not a volatility alpha either. The gem is real,
+it is probabilistic, and it is now measured rather than asserted.

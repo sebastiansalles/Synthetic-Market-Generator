@@ -275,11 +275,129 @@ button:disabled {
 .ensemble-stats strong {
   color: var(--text);
 }
+/* canvas and risk panel share the row; the canvas takes whatever is left */
+.ensemble-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
 .ensemble-canvas {
   flex: 1;
-  width: 100%;
+  min-width: 0;
   min-height: 0;
   display: block;
+}
+
+/* ---------- risk panel: the distribution as position questions ---------- */
+.risk-panel {
+  width: 304px;
+  flex: 0 0 304px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  padding: 14px 16px 22px;
+}
+.risk-block + .risk-block {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.risk-block h3 {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.risk-inputs {
+  display: flex;
+  gap: 10px;
+}
+.risk-inputs .field {
+  flex: 1;
+}
+.risk-rows {
+  margin: 12px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.risk-rows > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+.risk-rows dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.risk-rows dd {
+  margin: 0;
+  color: var(--text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.risk-rows dt.stop {
+  color: var(--bear);
+}
+.risk-rows dt.target {
+  color: var(--bull);
+}
+.risk-rows dd.pos strong {
+  color: var(--bull);
+}
+.risk-rows dd.neg strong {
+  color: var(--bear);
+}
+
+/* the stop / open / target split of the ensemble, to scale. The segments are
+   labelled in the rows beneath, so colour here reinforces and never carries the
+   meaning alone. */
+.risk-split {
+  display: flex;
+  height: 8px;
+  margin-top: 12px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+.risk-seg {
+  min-width: 2px;
+}
+.risk-seg + .risk-seg {
+  border-left: 1px solid var(--panel);
+}
+.risk-seg.stop {
+  background: var(--bear);
+}
+.risk-seg.none {
+  background: var(--border);
+}
+.risk-seg.target {
+  background: var(--bull);
+}
+.badge {
+  padding: 1px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
+@media (max-width: 900px) {
+  .ensemble-body {
+    flex-direction: column;
+  }
+  .risk-panel {
+    width: auto;
+    flex: 0 0 auto;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
 }
 .ensemble-empty {
   flex: 1;

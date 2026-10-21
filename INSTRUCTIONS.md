@@ -16,6 +16,7 @@ An empirically calibrated Monte Carlo engine that learns how real markets behave
 │   │   ├── calibration.py   # scrub, MLE (GBM/t/JD), GARCH-t, HMM, AssetProfile
 │   │   ├── volume.py        # per-state log-volume model
 │   │   ├── simulate.py      # regime-switching GARCH-t sim → OHLCV bars, validation suite
+│   │   ├── forecast.py      # causal filters: today's regime + conditional variance
 │   │   └── profile_store.py # versioned profile persistence
 │   └── tests/               # 113 pytest — the executable spec
 ├── api/app.py               # FastAPI: profiles, simulate, export, /ws tick stream
@@ -82,6 +83,14 @@ cd web && npm run build && cd ..                 # (re)build the frontend bundle
   an uncached profile computes in the background (~30 s) and the report is then cached
   next to the profile, keyed on a hash of the pickle — so a recalibration invalidates it
   and a clone does not.
+- **Distribution mode:** hundreds of seeded paths sweep across the canvas and the
+  percentile cone tightens as they accumulate. The side panel turns that
+  distribution into position questions — where the forecast opens (long-run shares
+  vs today's filtered regime and variance), the first-passage split of a stop/target
+  pair with its expectancy, and the bad case (drawdown quantiles, VaR, expected
+  shortfall). Barrier hits are computed on **closes only**, so they are lower
+  bounds; a level pierced intrabar but closed back inside is missed, and the bias
+  grows as the levels tighten.
 - **Live mode:** streams a 400-candle session tick-by-tick over WebSocket — watch each candle form, with the regime heatmap (blue = calm, red = turbulent) behind the price pane. The view auto-follows the tail until you pan.
 - **Chart:** wheel = zoom at cursor · drag = pan · double-click / `R` = reset · `←`/`→` pan · `+`/`−` zoom. Crosshair shows price tag + hovered OHLC; the right strip is the volume-at-price profile.
 - **Regime heatmap:** behind every run, not just live ones — a solid ribbon along the top
@@ -100,9 +109,11 @@ cd web && npm run build && cd ..                 # (re)build the frontend bundle
 | `GET /profiles/{asset}` | full parameter summary (state vols, dwells, drift ± SE, scrub audit) |
 | `GET /profiles/{asset}/validation` | the validation suite: every statistic vs the simulated 5–95% band, plus the return-density band. Cached per profile (`?refresh=true` recomputes) |
 | `GET /validation/families` | the metric families and the question each answers |
+| `GET /profiles/{asset}/conditional` | today's filtered regime probabilities and conditional vol, against the unconditional level |
 | `POST /simulate` | seeded OHLCV JSON (`n_candles` ≤ 10k, optional `start_price`, `drift_annual`, scenario) |
 | `POST /profiles/{asset}/recalibrate?max_history_years=N` | re-fit empirically; windowed fits save as `{asset}_last{N}y.pkl` |
 | `POST /export` | LEAN / CSV / Parquet download of a run spec |
+| `POST /ensemble` | the path matrix behind the distribution view (`condition: true` opens from today) |
 | `WS /ws/simulate?...` | live tick stream: `bar_open → ticks → bar_close → done` |
 | `GET /workflow` | resolutions, formats, scenario presets |
 
@@ -111,8 +122,8 @@ Set `SMG_CORS_ORIGINS` to override the default `*` CORS policy.
 ## 5. Tests
 
 ```bash
-cd engine && pytest -q        # 138 tests: engine math, estimators, API, WS, validation
-cd web && npm test            # 71 vitest: viewport/layout/live-reducer/store/evidence
+cd engine && pytest -q        # 157 tests: engine math, estimators, filters, API, WS, validation
+cd web && npm test            # 85 vitest: viewport/layout/live-reducer/store/evidence/risk
 npm run build                 # tsc typecheck + production bundle
 ```
 
@@ -122,7 +133,7 @@ Notebooks execute headlessly and top-to-bottom: `jupyter nbconvert --to notebook
 
 Real Yahoo data is haunted (corrupt prints, gap returns), so a robust scrubber removes what no per-bar rule can catch, keeping adjudicated real crashes. Parameters come from maximum likelihood with observed-information standard errors — not hand-tuning. Daily jump intensity is provably unidentifiable at daily frequency (flat likelihood ridge), so the engine uses GARCH(1,1) + Student-t innovations, with HMM regime switching per state; jump-like behavior enters via scenarios. Every gate is parametric-bootstrap honest: simulation bands, never point comparisons. Known limits and their remedies are on record in `PROGRESS.md` (gold wants a 3-state crash component; BTC-era effects; intrabar microstructure).
 
-Two explainers worth reading: [`docs/WHY_SO_VOLATILE.md`](docs/WHY_SO_VOLATILE.md) — why honest simulations look extreme and why seeds differ (dispersion math, random regime paths, zero identifiable drift); and [`docs/ON_CONVERGENCE_AND_PREDICTION.md`](docs/ON_CONVERGENCE_AND_PREDICTION.md) — an analysis of the convergence-as-prediction theory: what converges, why price prophecy fails, and why the converged ensemble is a *risk oracle* — the gem that is actually there.
+Two explainers worth reading: [`docs/WHY_SO_VOLATILE.md`](docs/WHY_SO_VOLATILE.md) — why honest simulations look extreme and why seeds differ (dispersion math, random regime paths, zero identifiable drift); and [`docs/ON_CONVERGENCE_AND_PREDICTION.md`](docs/ON_CONVERGENCE_AND_PREDICTION.md) — the convergence-as-prediction theory, now *measured* rather than argued: what converges, why price prophecy fails, why the engine's volatility forecast does not reliably beat a 20-bar moving average once hindsight is removed, and why the converged ensemble is nonetheless a *risk oracle* — the gem that is actually there.
 
 ## 7. Adding a new market
 

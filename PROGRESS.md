@@ -705,3 +705,157 @@ behaviour, and the whole bundle served single-port.
   toolbar's "engine 0.2.0" is really the API version.
 - `/workflow` still returns `sorted(RESOLUTIONS)`, so the control reads
   `daily | monthly | weekly` — alphabetical, not coarsening order.
+
+---
+
+## Session 22 — 2026-10-21 — Conditioning on today + the ensemble as a risk instrument
+
+User asked to dig into using the engine for prediction and a possible trading strategy.
+The honest answer required measuring claims the repo had only asserted, and two of the
+measurements came back against me. Both are recorded here because the corrections are
+more valuable than the original claims.
+
+### What shipped
+
+**`engine/synthetic/forecast.py`** — causal filters recovering where a forecast should
+start. `state_filter` is a Hamilton filter returning `n+1` rows, row `t` being
+`P(state_t | r_{<t})`; the final row is the distribution a forecast continuing past the
+last bar opens from. `variance_filter` runs the GARCH recursion per state.
+`conditional_state(profile, df_real)` is the public entry and serializes for the API.
+
+**The `start_probs` defect.** `simulate_regimes` opened every path from
+`regimes.start_probs` — the fitted distribution of the *sample's first bar*, a nuisance
+parameter of the HMM fit pinned to whatever regime prevailed decades ago. EUR/USD's is
+83% turbulent against a 19% long-run share, so paths opened in the turbulent state five
+times too often and took ~60 bars to mix back. It now opens from `stationary`. Long
+calibration runs were barely affected (thousands of bars swamp the opening), which is
+exactly why it survived this long: it distorts only the short horizons a forecast cares
+about. All 138 pre-existing tests passed unchanged across the fix, and the five
+validation tallies are identical — but `_VALIDATION_FORMAT` was bumped 2 → 3 and the
+reports regenerated, because the *generator* changed while the profile pickles did not,
+so the content digest could not see it.
+
+**Conditional seeding.** `simulate_regimes(start_probs=)`, `scenario_states(start_probs=)`
+and `conditional_returns(h0=)` let a forecast open from today's filtered regime and
+variance. Exposed as `condition: true` on `POST /ensemble` and `?condition=true` on
+`/ws/ensemble`, plus `GET /profiles/{asset}/conditional` for the state itself.
+
+**`web/src/engine/risk.ts`** — first-passage and tail analytics over the path matrix:
+`barrierOutcome` (stop/target split, median bars to each, expectancy), `drawdownDistribution`,
+`terminalRisk` (VaR + expected shortfall). Client-side, matching the existing decision
+that ensemble analytics live where the UI can explore them without round trips.
+Cross-checked against the gambler's-ruin formula: for driftless log-price with barriers
+a<0<b, P(hit b first) = |a|/(b-a) analytically, and the implementation reproduces it to
+within 0.035 on 3000 paths.
+
+**Risk panel** in distribution mode: forecast origin (long-run vs today, with today's
+regime mix and conditional vol against the unconditional level), the stop/target split
+bar with expectancy, and drawdown quantiles + VaR/ES.
+
+### Measured, and two corrections to the record
+
+**Volatility forecasting is much weaker than `ON_CONVERGENCE_AND_PREDICTION.md` claimed.**
+That doc asserted vol forecasting "Passes — this is the engine's genuine edge". Measured
+causally (Mincer-Zarnowitz R² on the next 20 bars' log realized variance):
+
+| profile | engine, causal | trailing-20 var | engine, Viterbi |
+|---|---|---|---|
+| eurusd | 0.557 | 0.497 | 0.596 |
+| xauusd | 0.319 | 0.307 | 0.434 |
+| btcusd | 0.137 | **0.196** | 0.224 |
+| btcusd_last4y | 0.027 | 0.025 | 0.018 |
+
+The engine does not reliably beat a 20-bar moving average of squared returns — it wins
+on EUR/USD, ties on gold, loses on BTC. My first pass reported the Viterbi column as if
+it were a forecast; Viterbi decodes the whole series, so bar `t` knows about bar `t+500`.
+The gap between columns one and three is pure hindsight, and it is roughly the entire
+apparent edge. Same story for strategies: causal vol targeting lifts gold's Sharpe
+0.54 → 0.63 and BTC's 0.69 → 0.79, but a trailing-20 estimator gets 0.67 and 0.82.
+
+**The re-init question reverses with the state path.** I expected the documented
+`h = uncond[t]` reset on every regime switch to cripple GARCH memory. Driven by Viterbi
+it is the *better* forecaster; driven by a causal path it is much worse (R² 0.407 vs
+0.557 carried). The resolution is principled: the generator knows its regime path
+exactly so resetting is free, while a filter only estimates it and a reset on a
+misclassified switch discards real information. `variance_filter` therefore defaults to
+`reinit=False`, deliberately unlike the generator, with `reinit=True` available for
+tests that compare the two on a known path.
+
+**Conditioning has a shelf life, and it is the dwell time.** Variance is discarded by
+the first regime switch, so how long a conditioned forecast differs from an
+unconditional one is asset-specific by an order of magnitude:
+
+| asset | dwell (d) | median bars to 1st switch | mixing time |
+|---|---|---|---|
+| eurusd | 104 / 24 | 56 | 66 |
+| xauusd | 59 / 17 | 31 | 31 |
+| btcusd | 11 / 4 | 6 | 10 |
+| btcusd_last3y | 5 / 2 | 3 | 2 |
+
+Verified live on 300-path ensembles: EUR/USD's opening 5-bar spread narrows 0.0071 →
+0.0040, tracking its 0.54x vol ratio, while `btcusd_last3y` does not move at all despite
+a comparable 0.57x ratio — it has already switched regime by bar three. Not a bug: a
+fast-switching chain genuinely forgets. It does mean the feature is worth far more on FX
+and gold than on crypto. The same timescale governed the `start_probs` bug, since both
+are questions about how long the chain's opening state survives.
+
+**Era-weighting destroys the vol-timing signal.** `btcusd_last4y` scores R² 0.027 and its
+baseline 0.025 — both collapse, so there is little forecastable vol *variation* left
+inside a homogeneous recent window. Distributional honesty and vol timing trade off: era
+window for scenario realism, full history for sizing.
+
+### Defects found and fixed in my own diff
+
+- **`rng.choice` rejects negatives outright.** `stationary` comes from `np.linalg.eig`,
+  so a near-absorbing state can carry a tiny negative component as float noise, which
+  would have crashed every simulation for that profile rather than degrading. All five
+  current profiles are safe (min component 0.19), but an era window on a quiet asset
+  could produce one. Clipped and normalized at the boundary, which also sanitizes a
+  caller-supplied override; zero-sum falls back to uniform. Tested.
+- **`Math.min(...data.paths.flat())` in the ensemble renderer** — at the permitted
+  maximum of 400 paths x 2000 candles that spreads 800k arguments, far past V8's
+  call-stack limit, so distribution mode threw `RangeError` instead of rendering at high
+  settings. Replaced with an explicit loop.
+- **`BAND_RECOMPUTE_MS` was declared and never used**, so the percentile cone re-sorted
+  every path at every time step on every animation frame while its comment claimed a
+  110ms throttle. Now honoured, keyed on array identity so a settled ensemble computes
+  once and a resize or theme flip reuses the result.
+- **The risk panel unmounted itself on click.** Switching the forecast origin clears the
+  stale ensemble, and the panel lived inside the `!ensemble` early return — so the
+  control vanished the moment you used it. The panel now stays mounted in the empty
+  state; its controls read the profile, not the paths.
+- My first conditional-state reading went through `hmm.model.predict_proba` raw rather
+  than `HMMRegimes.posterior`. `start_probs`/`transition` are canonicalized at fit time
+  but the stored hmmlearn model is not, and three of five profiles have
+  `model order = [1 0]` — so gold's reported posterior was column-swapped (83% calm, not
+  83% turbulent). The engine was always right; only my ad-hoc script was wrong, which is
+  the argument for the tested `conditional_state` entry point that replaced it.
+
+**Validation**: 157 pytest (+19) / 85 vitest (+14); tsc + production build clean.
+Verified against a live uvicorn: `/conditional` for all five profiles, conditioned vs
+unconditional opening dispersion, first-passage probabilities summing to 1 with no
+same-bar straddles possible on closes, ES >= VaR, and all five validation reports
+regenerated at cache format 3.
+
+### Still open
+
+- **Walk-forward validation.** Every Sharpe and R² above is in-sample on *parameters* —
+  the causal filter removes lookahead within the filter, not parameter lookahead.
+  Expanding-window refits are the gate, and nothing above should be believed at face
+  value until they run. No transaction costs either, so every turnover figure is an
+  unpaid liability.
+- **Barrier probabilities are close-only.** The ensemble carries no intrabar high/low, so
+  a level pierced intrabar but closed back inside is missed: every hit probability is a
+  lower bound and every "neither" an upper one, increasingly so as levels tighten. The
+  fix is an OHLC ensemble (the tick bridge already builds them for `/simulate`), not
+  anything in `risk.ts`. Surfaced in the panel copy rather than hidden.
+- **Strategy stress-testing** over synthetic histories — run a strategy across N paths,
+  get a distribution of Sharpe, compare the real backtest to that null (deflated Sharpe /
+  PBO). The original stated purpose and the strongest value claim available; LEAN export
+  already exists.
+- `/simulate` is not conditioned, only `/ensemble`. Deliberate scope limit, not an
+  oversight.
+- Everything in Session 21's "not done" list except the two distribution-view items this
+  session closed (stats visible while building, drawdown + expected shortfall). No band
+  legend, x axis still bar offsets, no ensemble export; distribution mode still has no
+  workflow panel and keeps `paths`/`candles` as bare toolbar inputs.
