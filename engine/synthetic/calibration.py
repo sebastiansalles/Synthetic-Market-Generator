@@ -469,6 +469,18 @@ def fit_state_innovation_df(r: pd.Series, hmm: HMMRegimes, min_days: int = 30) -
     return dfs
 
 
+def era_window(df: pd.DataFrame, max_history_years: float | None) -> pd.DataFrame:
+    """The trailing-era slice a windowed fit is calibrated on; the whole frame if None.
+
+    Defined once and shared: anything that re-measures a windowed profile (the
+    validation report, a holdout gate) has to use the same slice the parameters were
+    fitted on, or it compares the model against data it never saw."""
+    if max_history_years is None:
+        return df
+    cutoff = df["timestamp"].max() - pd.Timedelta(days=365.25 * max_history_years)
+    return df[df["timestamp"] >= cutoff].reset_index(drop=True)
+
+
 def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int | None = None,
               n_states: int = 2, seed: int = 0,
               max_history_years: float | None = None) -> AssetProfile:
@@ -489,9 +501,7 @@ def calibrate(df: pd.DataFrame, asset: str = "unknown", periods_per_year: int | 
         periods_per_year = spec.ppy_daily if spec else 252
     max_gap_days = spec.scrub_max_gap_days if spec else 6.0
 
-    if max_history_years is not None:
-        cutoff = df["timestamp"].max() - pd.Timedelta(days=365.25 * max_history_years)
-        df = df[df["timestamp"] >= cutoff].reset_index(drop=True)
+    df = era_window(df, max_history_years)
 
     r = log_returns(df)
     clean, report = scrub_returns(r, max_gap_days=max_gap_days)

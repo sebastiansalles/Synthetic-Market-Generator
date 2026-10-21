@@ -382,3 +382,63 @@ def test_exports_are_reproducible_from_the_manifest(profiles):
         for _ in range(2)
     ]
     assert runs[0] == runs[1]
+
+
+# ---------------------------------------------------------------------------
+# Regime path aggregation: the chart's heatmap must line up with the bars it colors
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_states_is_passthrough_at_daily():
+    from synthetic.export import aggregate_states
+
+    profile = load_profile(DEFAULT_PROFILE_DIR / "eurusd.pkl")
+    bars, latent = simulate(profile, 90, seed=11, start_price=1.1, debug=True)
+    out = aggregate_states(bars, latent["states"], "daily")
+    assert np.array_equal(out, latent["states"])
+
+
+@pytest.mark.parametrize("resolution", ["weekly", "monthly"])
+def test_aggregate_states_aligns_index_for_index_with_aggregate_bars(resolution):
+    """A heatmap one bar longer (or shorter) than the candles would mis-colour the
+    whole series, so the two aggregations must agree on bucket count exactly."""
+    from synthetic.export import aggregate_states
+
+    profile = load_profile(DEFAULT_PROFILE_DIR / "eurusd.pkl")
+    bars, latent = simulate(profile, 400, seed=5, start_price=1.1, debug=True)
+    coarse = aggregate_bars(bars, resolution)
+    states = aggregate_states(bars, latent["states"], resolution)
+    assert len(states) == len(coarse)
+    assert set(np.unique(states)) <= set(np.unique(latent["states"]))
+
+
+def test_aggregate_states_takes_the_modal_regime_and_breaks_ties_calm():
+    """Six daily bars per bucket: 4 calm / 2 turbulent -> calm; a 3/3 tie -> calm,
+    because over-reporting turbulence is the costlier error in a risk tool."""
+    from synthetic.export import aggregate_states
+
+    # one calendar week per bucket (W-FRI), two weeks of business days
+    ts = pd.bdate_range("2026-01-05", periods=10)  # Mon..Fri, Mon..Fri
+    bars = validate_ohlcv(pd.DataFrame({
+        "timestamp": ts,
+        "open": np.full(10, 100.0), "high": np.full(10, 101.0),
+        "low": np.full(10, 99.0), "close": np.full(10, 100.0),
+        "volume": np.zeros(10),
+    })[OHLCV_COLUMNS])
+    mostly_calm = np.array([0, 0, 0, 1, 1, 1, 1, 1, 0, 0])  # week 1: 3/2 calm, week 2: 3/2 turb
+    out = aggregate_states(bars, mostly_calm, "weekly")
+    assert out.tolist() == [0, 1]
+
+    tie = np.array([0, 0, 0, 1, 1, 0, 0, 1, 1, 1])  # week 1: 3/2 calm, week 2: 2/3 turb
+    assert aggregate_states(bars, tie, "weekly").tolist() == [0, 1]
+
+
+def test_aggregate_states_rejects_a_misaligned_path():
+    from synthetic.export import aggregate_states
+
+    profile = load_profile(DEFAULT_PROFILE_DIR / "eurusd.pkl")
+    bars = simulate(profile, 40, seed=1, start_price=1.1)
+    with pytest.raises(ValueError, match="align"):
+        aggregate_states(bars, np.zeros(39, dtype=int), "weekly")
+    with pytest.raises(ValueError, match="unknown resolution"):
+        aggregate_states(bars, np.zeros(40, dtype=int), "hourly")

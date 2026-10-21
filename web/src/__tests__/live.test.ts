@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { heatColor, initLive, reduceEvent, WsEvent } from "../engine/live";
+import { initLive, reduceEvent, WsEvent } from "../engine/live";
 
 function session(events: WsEvent[]) {
   let s = initLive();
@@ -41,10 +41,5 @@ describe("live reducer", () => {
     const bad = reduceEvent(initLive(), { type: "error", message: "boom" });
     expect(bad.done).toBe(true);
     expect(bad.error).toBe("boom");
-  });
-
-  it("heatmap colors distinguish calm from turbulent", () => {
-    expect(heatColor(0)).not.toBe(heatColor(1));
-    expect(heatColor(1)).toContain("248, 81, 73");
   });
 });

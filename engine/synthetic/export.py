@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from synthetic.data import OHLCV_COLUMNS, validate_ohlcv
@@ -68,6 +69,34 @@ def aggregate_bars(bars: pd.DataFrame, resolution: str) -> pd.DataFrame:
         .dropna(subset=["open"])
     )
     return validate_ohlcv(out.reset_index(drop=True)[OHLCV_COLUMNS])
+
+
+def aggregate_states(bars: pd.DataFrame, states: np.ndarray, resolution: str) -> np.ndarray:
+    """The regime path bucketed onto the same grid `aggregate_bars` produces.
+
+    A coarse bar spans several daily regimes, so its bucket takes the *modal* state —
+    "which regime was this week mostly in". Ties break toward the calmer state
+    (bincount/argmax returns the lowest index, and HMM states are canonically ordered
+    calm -> turbulent), which keeps the heatmap from over-reporting turbulence.
+
+    `bars` must be the DAILY frame that `states` was simulated with; the bucket edges
+    are derived from it so the result lines up index-for-index with the aggregation."""
+    if resolution not in RESOLUTIONS:
+        raise ValueError(f"unknown resolution '{resolution}' (have: {sorted(RESOLUTIONS)})")
+    states = np.asarray(states, dtype=int)
+    if len(states) != len(bars):
+        raise ValueError(f"states ({len(states)}) must align with bars ({len(bars)})")
+    rule = RESOLUTIONS[resolution]
+    if rule is None:
+        return states
+    frame = pd.DataFrame({"open": bars["open"].to_numpy(dtype=float), "state": states},
+                         index=pd.DatetimeIndex(bars["timestamp"]))
+    out = (
+        frame.resample(rule)
+        .agg({"open": "first", "state": lambda g: np.bincount(g.to_numpy(dtype=int)).argmax()})
+        .dropna(subset=["open"])  # same empty-bucket drop as aggregate_bars
+    )
+    return out["state"].to_numpy(dtype=int)
 
 
 # ---------------------------------------------------------------------------

@@ -376,7 +376,7 @@ def test_websocket_states_match_the_simulated_tick_stream():
     from synthetic.simulate import simulate_ticks
 
     profile = load_profile(DEFAULT_PROFILE_DIR / "eurusd.pkl")
-    _, ticks = simulate_ticks(profile, 12, seed=7, ticks_per_candle=3,
+    _, ticks, _ = simulate_ticks(profile, 12, seed=7, ticks_per_candle=3,
                               start_price=profile.last_close)
     expected = ticks.groupby("bar_id")["state"].first().tolist()
 
@@ -394,7 +394,7 @@ def test_tick_stream_carries_state_for_heatmap():
     from synthetic.calibration import calibrate
 
     profile = calibrate(df, asset="xauusd", seed=0)
-    _, ticks = simulate_ticks(profile, 50, seed=1, ticks_per_candle=8)
+    _, ticks, _ = simulate_ticks(profile, 50, seed=1, ticks_per_candle=8)
 
     assert "state" in ticks.columns
     assert set(ticks["state"].unique()) <= set(range(profile.hmm.n_states))
@@ -487,3 +487,153 @@ def test_websocket_streams_ensemble_paths_in_order():
     assert indices == [0, 1, 2, 3, 4, 5]
     assert meta["n_paths"] == 6 and meta["n_candles"] == 30
     assert abs(meta["start_price"] - client.get("/profiles/eurusd").json()["last_close"]) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# /simulate carries the regime path: the heatmap used to exist only in live mode
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("resolution,expected", [("daily", 300), ("weekly", 60), ("monthly", 15)])
+def test_simulate_returns_a_regime_state_per_returned_bar(resolution, expected):
+    """One state per BAR AS RETURNED — not per simulated daily bar. The chart indexes
+    the heatmap by displayed-bar position, so a weekly run with 300 daily states would
+    colour the first 60 weeks with the first 60 days' regimes."""
+    body = client.post("/simulate", json={"asset": "eurusd", "n_candles": 300, "seed": 3,
+                                          "resolution": resolution}).json()
+    assert body["n_candles"] == expected
+    assert len(body["states"]) == len(body["bars"]) == expected
+    assert body["n_states"] == 2
+    assert set(body["states"]) <= {0, 1}
+
+
+def test_simulate_states_are_the_path_that_made_the_bars():
+    """The endpoint must not re-simulate the regimes: it hands back the latent path
+    from the same call that produced the candles."""
+    from synthetic.profile_store import DEFAULT_PROFILE_DIR, load_profile
+    from synthetic.simulate import simulate as engine_simulate
+
+    profile = load_profile(DEFAULT_PROFILE_DIR / "eurusd.pkl")
+    body = client.post("/simulate", json={"asset": "eurusd", "n_candles": 120, "seed": 42,
+                                          "start_price": 1.1}).json()
+    _, latent = engine_simulate(profile, 120, seed=42, start_price=1.1,
+                                start_date=body["bars"][0]["timestamp"][:10], debug=True)
+    assert body["states"] == [int(s) for s in latent["states"]]
+
+
+def test_simulate_states_reflect_a_forced_scenario():
+    """A turbulent-open preset must show as turbulent bars at the head of the heatmap,
+    otherwise the chart would contradict the scenario the user picked."""
+    body = client.post("/simulate", json={"asset": "eurusd", "n_candles": 400, "seed": 8,
+                                          "preset": "turbulent"}).json()
+    assert all(s == 1 for s in body["states"][:60])
+    assert 0 in body["states"][60:]  # the chain resumes rather than staying forced
+
+
+# ---------------------------------------------------------------------------
+# Validation evidence: Phase 2's gate, served and cached
+# ---------------------------------------------------------------------------
+
+
+def _await_validation(asset: str, tries: int = 120, pause: float = 1.0) -> dict:
+    """Poll until the background worker finishes. The suite is genuinely slow, so the
+    endpoint is asynchronous by design and the test waits like the UI does."""
+    import time as _time
+
+    for _ in range(tries):
+        body = client.get(f"/profiles/{asset}/validation").json()
+        if body["status"] != "computing":
+            return body
+        _time.sleep(pause)
+    raise AssertionError(f"validation for {asset} never finished")
+
+
+def test_validation_report_is_asynchronous_then_cached():
+    first = client.get("/profiles/eurusd/validation").json()
+    assert first["status"] in {"computing", "ready"}  # may already be cached on disk
+    body = _await_validation("eurusd")
+    assert body["status"] == "ready"
+
+    assert body["n_sims"] == 200
+    assert body["n_bars"] > 5000
+    assert body["summary"]["total"] == len(body["metrics"])
+    assert body["summary"]["passed"] == sum(m["inside"] for m in body["metrics"])
+
+    # a second call must be served from cache, not recomputed
+    again = client.get("/profiles/eurusd/validation").json()
+    assert again["status"] == "ready"
+    assert again["cache"]["computed_at"] == body["cache"]["computed_at"]
+
+
+def test_validation_metrics_carry_everything_the_ui_renders():
+    body = _await_validation("eurusd")
+    for m in body["metrics"]:
+        assert set(m) == {"key", "label", "family", "unit", "real", "sim_median",
+                          "lo", "hi", "inside"}
+        assert m["unit"] in {"ret", "pct", "num"}
+        assert m["lo"] <= m["sim_median"] <= m["hi"]
+        # the verdict is derivable from the band, so the two can never disagree
+        assert m["inside"] == (m["lo"] <= m["real"] <= m["hi"])
+        assert m["label"] and m["family"]
+
+    families = {f["key"] for f in body["families"]}
+    assert families == {m["family"] for m in body["metrics"]}
+    for f in body["families"]:
+        rows = [m for m in body["metrics"] if m["family"] == f["key"]]
+        assert f["total"] == len(rows)
+        assert f["passed"] == sum(m["inside"] for m in rows)
+        assert f["blurb"]
+
+
+def test_validation_density_band_is_ordered_and_plottable():
+    body = _await_validation("eurusd")
+    d = body["density"]
+    n = len(d["centers"])
+    assert n == 64
+    assert all(len(d[k]) == n for k in ("real", "lo", "median", "hi"))
+    assert d["real_sd"] > 0
+    # a band whose floor crosses its ceiling would render as an inverted ribbon
+    for i in range(n):
+        assert d["lo"][i] <= d["median"][i] <= d["hi"][i]
+        assert d["real"][i] >= 0
+    assert d["centers"][0] < 0 < d["centers"][-1]
+    assert max(d["real"]) > 0
+
+
+def test_validation_cache_is_keyed_on_the_profile_contents():
+    """Evidence must never outlive the parameters it was measured on, and must survive
+    a clone: the key is a hash of the profile pickle, not its mtime."""
+    import hashlib
+    import json
+
+    from synthetic.profile_store import DEFAULT_PROFILE_DIR
+
+    _await_validation("eurusd")
+    cache_path = DEFAULT_PROFILE_DIR / "eurusd.validation.json"
+    cached = json.loads(cache_path.read_text())
+    expected = hashlib.sha256((DEFAULT_PROFILE_DIR / "eurusd.pkl").read_bytes()).hexdigest()[:16]
+    assert cached["cache"]["profile_digest"] == expected
+
+    # touching the profile must NOT invalidate a valid report (what mtime keying did)
+    (DEFAULT_PROFILE_DIR / "eurusd.pkl").touch()
+    assert client.get("/profiles/eurusd/validation").json()["status"] == "ready"
+
+    # but different parameters must
+    stale = {**cached, "cache": {**cached["cache"], "profile_digest": "deadbeefdeadbeef"}}
+    cache_path.write_text(json.dumps(stale))
+    try:
+        assert client.get("/profiles/eurusd/validation").json()["status"] == "computing"
+    finally:
+        _await_validation("eurusd")  # leave the cache warm for the other tests
+
+
+def test_validation_404s_for_an_unknown_profile():
+    assert client.get("/profiles/nosuchasset/validation").status_code == 404
+
+
+def test_validation_families_endpoint_describes_the_metric_groups():
+    body = client.get("/validation/families").json()
+    keys = [f["key"] for f in body["families"]]
+    assert keys[0] == "returns"
+    assert "clustering" in keys and "candles" in keys
+    assert all(f["label"] and f["blurb"] for f in body["families"])

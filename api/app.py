@@ -8,8 +8,11 @@ simulator. Phase 4 adds the WebSocket tick stream on top of synthetic.simulate.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import re
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -22,17 +25,25 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from synthetic.calibration import AssetProfile, calibrate, calibrated_drift
+from synthetic.calibration import AssetProfile, calibrate, calibrated_drift, era_window
 from synthetic.data import DEFAULT_PROCESSED_DIR
-from synthetic.export import RESOLUTIONS, ExportManifest, aggregate_bars, export_bytes
+from synthetic.export import (
+    RESOLUTIONS,
+    ExportManifest,
+    aggregate_bars,
+    aggregate_states,
+    export_bytes,
+)
 from synthetic.profile_store import DEFAULT_PROFILE_DIR, load_profile, save_profile
 from synthetic.registry import REGISTRY
 from synthetic.simulate import (
+    METRIC_FAMILIES,
     SCENARIO_PRESETS,
     Scenario,
     build_scenario,
     simulate,
     simulate_ticks,
+    validation_report,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -231,10 +242,14 @@ def simulate_endpoint(body: SimulateIn) -> dict:
         start_date = body.start_date
         if start_date is None and body.end_date is None:
             start_date = _forward_start(profile)
-        bars = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
-                        ticks_per_candle=body.ticks_per_candle, start_price=start_price,
-                        end_date=body.end_date, start_date=start_date,
-                        drift_annual=body.drift_annual)
+        # debug=True hands back the latent regime path that produced these very bars,
+        # so the chart's heatmap is the model's own state sequence — not a re-draw.
+        bars, latent = simulate(profile, body.n_candles, scenario=scenario, seed=body.seed,
+                                ticks_per_candle=body.ticks_per_candle, start_price=start_price,
+                                end_date=body.end_date, start_date=start_date,
+                                drift_annual=body.drift_annual, debug=True)
+        # states bucket onto the SAME grid as the bars (modal regime per coarse bar)
+        states = aggregate_states(bars, latent["states"], body.resolution)
         bars = aggregate_bars(bars, body.resolution)
     except ValueError as exc:  # e.g. a jump placed outside the path, or a bad resolution
         raise HTTPException(422, str(exc))
@@ -242,6 +257,11 @@ def simulate_endpoint(body: SimulateIn) -> dict:
     records["timestamp"] = pd.to_datetime(records["timestamp"]).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"asset": body.asset, "seed": body.seed, "n_candles": len(records),
             "resolution": body.resolution, "bars": records.to_dict(orient="records"),
+            # the HMM regime per displayed bar: the heatmap is the project's visual
+            # proof that the regime model is doing something, and it used to be
+            # visible only during a live stream
+            "states": [int(x) for x in states],
+            "n_states": int(profile.hmm.n_states),
             # when a preset injects a shock (flash crash), tell the UI where to look
             "shock_at": scenario.jump_at if scenario and scenario.jump_at is not None else None,
             "preset": body.preset}
@@ -318,6 +338,132 @@ def recalibrate(asset: str, seed: int = Query(default=0),
 
 
 # ---------------------------------------------------------------------------
+# Validation evidence: Phase 2's gate, served.
+#
+# The suite is the project's whole claim to rigor and it lived only in notebooks and
+# PROGRESS.md, so the app looked like a charting toy. It is also far too slow for a
+# request (200 sims over a full history is ~30s), so it is computed once per profile,
+# cached next to the profile, and recomputed in a background thread whenever the
+# profile changes underneath it.
+# ---------------------------------------------------------------------------
+
+VALIDATION_SIMS = 200
+VALIDATION_SEED = 101
+_VALIDATION_FORMAT = 2  # bump to invalidate every cached artifact on disk
+
+_validation_jobs: dict[str, str] = {}  # stem -> "running" or an error message
+_validation_lock = threading.Lock()
+
+
+def _validation_cache_path(stem: str) -> Path:
+    return DEFAULT_PROFILE_DIR / f"{stem}.validation.json"
+
+
+def _profile_digest(stem: str) -> str:
+    """Content hash of the profile pickle — the cache key.
+
+    Not mtime: git does not preserve timestamps, so an mtime key would throw away
+    every committed report the moment someone cloned the repo, and the app would
+    greet a new reader with a 30-second spinner instead of the evidence. A content
+    hash also stops a `touch` from invalidating a still-valid computation, and still
+    catches a recalibration that happens to land on the same timestamp."""
+    data = (DEFAULT_PROFILE_DIR / f"{stem}.pkl").read_bytes()
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _real_frame(profile: AssetProfile) -> pd.DataFrame:
+    """The real bars a profile should be judged against.
+
+    An era-windowed profile (`btcusd_last3y`) must be scored on its own window: the
+    era study's entire finding is that full history describes a regime the asset has
+    left, so validating a 3-year fit against 12 years of data would manufacture a
+    failure the model is not responsible for."""
+    base = re.sub(r"_last[\d.]+y$", "", profile.asset)
+    parquet = DEFAULT_PROCESSED_DIR / f"{base}_1d.parquet"
+    if not parquet.exists():
+        raise HTTPException(
+            404,
+            f"no processed data for '{base}' — run: python -m synthetic.data download --only {base}",
+        )
+    return era_window(pd.read_parquet(parquet), getattr(profile, "history_years", None))
+
+
+def _cached_validation(stem: str, digest: str) -> dict | None:
+    path = _validation_cache_path(stem)
+    if not path.exists():
+        return None
+    try:
+        cached = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None  # corrupt artifact: recompute rather than serve nonsense
+    meta = cached.get("cache", {})
+    fresh = (
+        meta.get("format") == _VALIDATION_FORMAT
+        and meta.get("n_sims") == VALIDATION_SIMS
+        and meta.get("seed") == VALIDATION_SEED
+        # a recalibration rewrites the pickle: the evidence must not outlive the
+        # parameters it was measured on
+        and meta.get("profile_digest") == digest
+    )
+    return cached if fresh else None
+
+
+def _compute_validation(stem: str, profile: AssetProfile, digest: str) -> None:
+    """Background worker: run the suite and write the cache artifact."""
+    try:
+        report = validation_report(profile, _real_frame(profile),
+                                   n_sims=VALIDATION_SIMS, seed=VALIDATION_SEED)
+        report["cache"] = {"format": _VALIDATION_FORMAT, "n_sims": VALIDATION_SIMS,
+                           "seed": VALIDATION_SEED, "profile_digest": digest,
+                           "computed_at": pd.Timestamp.now("UTC").isoformat()}
+        tmp = _validation_cache_path(stem).with_suffix(".json.tmp")
+        # allow_nan=False on purpose: Python emits bare NaN/Infinity, which is not
+        # valid JSON and throws in JSON.parse. Better the job reports a failure the
+        # panel can show than that the browser receives an unparseable report.
+        tmp.write_text(json.dumps(report, allow_nan=False))
+        tmp.replace(_validation_cache_path(stem))  # atomic: no half-written artifact
+        with _validation_lock:
+            _validation_jobs.pop(stem, None)
+    except Exception as exc:  # the job owns its failure; the endpoint reports it
+        with _validation_lock:
+            _validation_jobs[stem] = f"{type(exc).__name__}: {exc}"
+
+
+@app.get("/profiles/{asset}/validation")
+def get_validation(asset: str, refresh: bool = Query(default=False)) -> dict:
+    """The statistical validation suite for one profile.
+
+    `status` is `ready` with the full report, `computing` while a background run is in
+    flight (poll), or `failed` with the reason. `refresh=true` forces a recompute."""
+    profile = _get_profile(asset)
+    digest = _profile_digest(asset)
+
+    if not refresh:
+        cached = _cached_validation(asset, digest)
+        if cached is not None:
+            return {"status": "ready", **cached}
+
+    with _validation_lock:
+        running = _validation_jobs.get(asset)
+        if running == "running":
+            return {"status": "computing", "asset": asset, "n_sims": VALIDATION_SIMS}
+        if running is not None and not refresh:
+            return {"status": "failed", "asset": asset, "message": running}
+        _validation_jobs[asset] = "running"
+
+    threading.Thread(target=_compute_validation, args=(asset, profile, digest),
+                     daemon=True, name=f"validate-{asset}").start()
+    return {"status": "computing", "asset": asset, "n_sims": VALIDATION_SIMS}
+
+
+@app.get("/validation/families")
+def validation_families() -> dict:
+    """The metric families and the question each one answers — so the UI explains the
+    evidence rather than listing it."""
+    return {"families": [{"key": k, "label": lbl, "blurb": b} for k, lbl, b in METRIC_FAMILIES]}
+
+
+# ---------------------------------------------------------------------------
 # Phase 4: live tick stream (one code path: events come from simulate_ticks)
 # ---------------------------------------------------------------------------
 
@@ -346,7 +492,7 @@ async def ws_simulate(
         scenario = Scenario(force_state, force_n) if force_state is not None else None
         await ws.send_json({"type": "generating", "n_candles": n_candles})  # session builds off-loop
         loop = asyncio.get_running_loop()
-        bars, ticks = await loop.run_in_executor(
+        bars, ticks, _ = await loop.run_in_executor(
             None,
             lambda: simulate_ticks(
                 profile, n_candles, seed=seed, scenario=scenario,

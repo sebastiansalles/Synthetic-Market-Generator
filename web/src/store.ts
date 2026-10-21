@@ -5,7 +5,7 @@ import { initLive, LiveState, reduceEvent, WsEvent } from "./engine/live";
 import { Viewport, panBy, zoomAt } from "./engine/viewport";
 
 export type Theme = "dark" | "light";
-export type AppMode = "single" | "ensemble";
+export type AppMode = "single" | "ensemble" | "evidence";
 
 const storedTheme = (): Theme =>
   typeof localStorage !== "undefined" && localStorage.getItem("smg-theme") === "light"
@@ -15,6 +15,7 @@ const storedTheme = (): Theme =>
 interface ChartState {
   asset: string;
   bars: Candle[];
+  states: number[]; // HMM regime per bar in `bars` — drives the chart's heatmap
   seed: number;
   nCandles: number;
   resolution: string;
@@ -32,7 +33,7 @@ interface ChartState {
   marker: { index: number; label: string } | null; // scenario shock annotation
   runKey: string; // settings the current bars belong to; unchanged settings = no refetch
   setAsset: (a: string) => void;
-  setBars: (bars: Candle[], asset: string) => void;
+  setBars: (bars: Candle[], asset: string, states?: number[]) => void;
   setStatus: (s: string) => void;
   zoomAtPx: (anchorPx: number, factor: number, widthPx: number) => void;
   panByPx: (dxPx: number, widthPx: number) => void;
@@ -75,6 +76,7 @@ const displayCount = (s: ChartState): number =>
 export const useStore = create<ChartState>((set, get) => ({
   asset: "eurusd",
   bars: [],
+  states: [],
   seed: 2026,
   nCandles: 1500,
   resolution: "daily",
@@ -87,13 +89,13 @@ export const useStore = create<ChartState>((set, get) => ({
   crosshair: null,
   // switching markets clears bars immediately: no stale-frame glitch while the
   // new simulation streams in (the UI shows the loading state instead)
-  setAsset: (asset) => set((s) => (asset === s.asset ? {} : { asset, bars: [] })),
+  setAsset: (asset) => set((s) => (asset === s.asset ? {} : { asset, bars: [], states: [] })),
   // stale responses are dropped: a late reply from a previously-selected asset
   // must not flip the chart back (the opening glitch)
-  setBars: (bars, asset) =>
+  setBars: (bars, asset, states = []) =>
     set((s) => {
       if (asset !== s.asset) return {};
-      return { bars, viewport: s.bars.length > 0 ? s.viewport : defaultViewport(bars.length) };
+      return { bars, states, viewport: s.bars.length > 0 ? s.viewport : defaultViewport(bars.length) };
     }),
   setStatus: (status) => set({ status }),
   // A live session starts with a handful of bars but inherits the static view's zoom
@@ -101,9 +103,11 @@ export const useStore = create<ChartState>((set, get) => ({
   // a zoom sized for a forming session; `follow` then keeps the tail in view.
   startLive: () => set({ live: initLive(), follow: true, viewport: LIVE_VIEWPORT }),
   applyWsEvent: (ev) => set((s) => (s.live ? { live: reduceEvent(s.live, ev) } : {})),
-  stopLive: () => set({ live: null, bars: [] }), // no stale flash while static refetches
+  stopLive: () => set({ live: null, bars: [], states: [] }), // no stale flash while static refetches
+  // the session's regime path comes with it: the heatmap the user just watched build
+  // must not vanish the instant the stream ends
   promoteLive: () =>
-    set((s) => (s.live ? { bars: s.live.bars, live: null } : {})),
+    set((s) => (s.live ? { bars: s.live.bars, states: s.live.states.slice(0, s.live.bars.length), live: null } : {})),
   setCrosshair: (crosshair) => set({ crosshair }),
   theme: storedTheme(),
   setTheme: (theme) => {

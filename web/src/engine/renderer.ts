@@ -1,7 +1,6 @@
 /** Canvas 2D renderer — no charting libraries. One pass per redraw, no retained
  *  state, allocations only inside the visible window. Dark theme. */
 import { ChartLayout, VolumeProfileBin } from "./candles";
-import { heatColor } from "./live";
 import { niceTicks, priceToY } from "./viewport";
 
 export const THEMES = {
@@ -17,6 +16,13 @@ export const THEMES = {
     accent: "#1f6feb",
     accentSoft: "rgba(88, 166, 255, 0.25)",
     panelFade: "rgba(1, 4, 9, 0.78)",
+    // Regime colors, calm -> turbulent (HMM states are canonically ordered by
+    // variance). These are the RIBBON inks, drawn at full opacity; the background
+    // wash is the same hue at `regimeAlpha`, so the two can never disagree.
+    // Validated for colour-vision deficiency at 2 states (the only case any shipped
+    // profile produces): worst adjacent pair ΔE 26.7 protan / 35.2 normal vision.
+    regimeInk: ["#3b82f6", "#ef4444", "#a855f7"],
+    regimeAlpha: [0.06, 0.2, 0.3],
   },
   light: {
     bg: "#ffffff",
@@ -30,6 +36,9 @@ export const THEMES = {
     accent: "#0b5fff",
     accentSoft: "rgba(11, 95, 255, 0.20)",
     panelFade: "rgba(255, 255, 255, 0.85)",
+    // darker inks and lighter washes: a light surface swallows the dark theme's values
+    regimeInk: ["#2563eb", "#dc2626", "#9333ea"],
+    regimeAlpha: [0.05, 0.16, 0.26],
   },
 } as const;
 
@@ -45,9 +54,60 @@ export interface DrawOptions {
   axisWidth: number; // right-side price gutter
 }
 
-export interface LiveOverlay {
-  states: number[]; // regime per bar index (HMM heatmap)
-  formingIndex: number | null; // bar currently forming (drawn with emphasis)
+/** The HMM regime path behind the candles. Present for every run, not just live ones:
+ *  this heatmap is the project's visual evidence that the regime model does something,
+ *  and it was previously drawn only while a live session streamed. */
+export interface RegimeOverlay {
+  states: number[]; // regime per bar index, indexed in bars[] space
+  formingIndex: number | null; // live only: bar currently forming (drawn with emphasis)
+}
+
+export const REGIME_LABELS = ["calm", "turbulent", "crisis"] as const;
+
+/** Height of the solid regime ribbon along the top of the price pane, in px.
+ *
+ *  The ribbon exists because the background wash alone cannot carry the signal: a
+ *  wash pale enough to sit behind candles without fighting them separates by only
+ *  ΔE ~6 under protanopia, and this heatmap is the project's visual evidence that
+ *  the regime model works. The ribbon is the primary encoding (full-opacity, 26.7
+ *  ΔE protan) and the wash reinforces it. The legend labels both in words, so
+ *  identity never rests on colour alone. */
+export const RIBBON_H = 5;
+
+const clampRegime = (theme: (typeof THEMES)[ThemeName], state: number): number =>
+  Math.min(Math.max(state | 0, 0), theme.regimeInk.length - 1);
+
+/** Solid regime colour, clamped — a 3-state profile must not fall off the palette. */
+export function regimeInk(theme: (typeof THEMES)[ThemeName], state: number): string {
+  return theme.regimeInk[clampRegime(theme, state)];
+}
+
+// Composed once per theme, not once per bar. drawChart calls regimeWash for every
+// visible candle, so parsing the hex and building the rgba() string inline meant
+// ~3 parseInt plus a string allocation per bar per frame — at 1500 candles and 60fps
+// that is 90k throwaway strings a second, in the one module whose stated contract is
+// "allocations only inside the visible window".
+const washCache = new WeakMap<object, readonly string[]>();
+
+function washes(theme: (typeof THEMES)[ThemeName]): readonly string[] {
+  let cached = washCache.get(theme);
+  if (!cached) {
+    cached = theme.regimeInk.map((hex, i) => {
+      const [r, g, b] = [1, 3, 5].map((k) => parseInt(hex.slice(k, k + 2), 16));
+      return `rgba(${r}, ${g}, ${b}, ${theme.regimeAlpha[i]})`;
+    });
+    washCache.set(theme, cached);
+  }
+  return cached;
+}
+
+/** The same hue as the ribbon, at wash alpha: one source of truth for both. */
+export function regimeWash(theme: (typeof THEMES)[ThemeName], state: number): string {
+  return washes(theme)[clampRegime(theme, state)];
+}
+
+export function regimeLabel(state: number): string {
+  return REGIME_LABELS[state] ?? `state ${state}`;
 }
 
 export interface CrosshairInfo {
@@ -71,7 +131,7 @@ export function drawChart(
   layout: ChartLayout,
   opts: DrawOptions,
   theme: (typeof THEMES)[ThemeName] = THEMES.dark,
-  overlay?: LiveOverlay,
+  overlay?: RegimeOverlay,
   profile?: ProfileDraw[],
   crosshair?: CrosshairInfo,
   marker?: MarkerInfo,
@@ -81,6 +141,25 @@ export function drawChart(
 
   ctx.fillStyle = theme.bg;
   ctx.fillRect(0, 0, width, height);
+
+  // regime heatmap: one background column per bar, colored by its HMM state. Drawn
+  // FIRST so it reads as background — painted after the grid it tinted the gridlines.
+  // Columns are drawn edge-to-edge (ceil of the span) so neighbouring bars in the
+  // same regime form one continuous block instead of a picket fence at low zoom.
+  const ribbonH = overlay ? RIBBON_H : 0;
+  if (overlay) {
+    for (let i = 0; i < layout.geoms.length; i++) {
+      const g = layout.geoms[i];
+      const st = overlay.states[g.index];
+      if (st === undefined) continue;
+      const x0 = Math.floor(g.x - layout.pxPerCandle / 2);
+      const w = Math.ceil(layout.pxPerCandle) + 1;
+      ctx.fillStyle = regimeWash(theme, st);
+      ctx.fillRect(x0, 0, w, priceHeight);
+      ctx.fillStyle = regimeInk(theme, st);
+      ctx.fillRect(x0, 0, w, ribbonH);
+    }
+  }
 
   // grid + price axis labels
   ctx.strokeStyle = theme.grid;
@@ -129,17 +208,6 @@ export function drawChart(
     }
   }
 
-  // regime heatmap: background column per bar, colored by inferred HMM state
-  if (overlay) {
-    for (let i = 0; i < layout.geoms.length; i++) {
-      const g = layout.geoms[i];
-      const st = overlay.states[g.index];
-      if (st === undefined) continue;
-      ctx.fillStyle = heatColor(st);
-      ctx.fillRect(g.x - layout.pxPerCandle / 2, 0, layout.pxPerCandle, priceHeight);
-    }
-  }
-
   // volume profile: horizontal histogram of volume-at-price (right-aligned strip)
   if (profile && profile.length > 0) {
     const strip = 56;
@@ -183,7 +251,7 @@ export function drawChart(
       ctx.strokeStyle = theme.bear;
       ctx.setLineDash([6, 4]);
       ctx.beginPath();
-      ctx.moveTo(x, 0);
+      ctx.moveTo(x, ribbonH);
       ctx.lineTo(x, priceHeight);
       ctx.stroke();
       ctx.setLineDash([]);
@@ -191,10 +259,10 @@ export function drawChart(
       const tw = ctx.measureText(marker.label).width + 12;
       const lx = Math.min(Math.max(x + 6, 6), plotW - tw - 6);
       ctx.fillStyle = theme.bear;
-      ctx.fillRect(lx, 6, tw, 18);
+      ctx.fillRect(lx, 6 + ribbonH, tw, 18);
       ctx.fillStyle = "#ffffff";
       ctx.textAlign = "left";
-      ctx.fillText(marker.label, lx + 6, 15.5);
+      ctx.fillText(marker.label, lx + 6, 15.5 + ribbonH);
     }
   }
 
@@ -228,9 +296,9 @@ export function drawChart(
     if (c && g) {
       const txt = `O ${formatPrice(c.open)}  H ${formatPrice(c.high)}  L ${formatPrice(c.low)}  C ${formatPrice(c.close)}`;
       ctx.fillStyle = theme.panelFade;
-      ctx.fillRect(6, 6, ctx.measureText(txt).width + 12, 18);
+      ctx.fillRect(6, 6 + ribbonH, ctx.measureText(txt).width + 12, 18);
       ctx.fillStyle = theme.crosshair;
-      ctx.fillText(txt, 12, 15.5);
+      ctx.fillText(txt, 12, 15.5 + ribbonH);
     }
   }
 }

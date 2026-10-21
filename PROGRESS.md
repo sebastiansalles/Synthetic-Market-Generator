@@ -581,3 +581,127 @@ the project, so it needs its own holdout gate, like Phase 1's.
 - Tests: WS ensemble choreography (start → 6 ordered paths → done, anchor check); 117 pytest / 49 vitest; live smoke: 12-path flash-crash stream, shock_at = 36, BTC-anchored.
 
 **Status**: committed as part of the pushed distribution-mode work; this session is the animated-build follow-up.
+
+## Session 21 — 2026-10-19 — Making the rigor visible (evidence panel + always-on regimes)
+
+Response to the user's read that "the UI is sloppy and it's hard to see the value".
+Diagnosis: the math was finished, the *argument* was not. Two of the four items from
+that review are done here; the shell restructure and the distribution-view finish are
+still open.
+
+**1. The validation suite is on screen.** `validation_suite` existed, was tested, and
+was referenced nowhere outside notebooks — `grep -rn validation_suite api/ web/src/`
+returned nothing. The entire evidentiary basis of the project was invisible in the app.
+
+- `validation_report()` — the same parametric bootstrap as `validation_suite`, as a
+  JSON-safe dict: per-metric real value / sim median / 5-95% band / verdict, grouped
+  into six families each carrying the question it answers, plus a **return-density
+  band** (64 bins over +/-8 real sigma: the real histogram against the 5-95% envelope of
+  200 simulated histograms). `validation_suite` is now a thin table view over it, same
+  columns as before.
+- `GET /profiles/{asset}/validation`, computed in a background thread (~30 s for 200
+  sims) and cached next to the profile. Cache key is a **sha256 of the profile pickle**,
+  not its mtime: git does not preserve timestamps, so an mtime key would discard every
+  committed report on clone and greet a new reader with a spinner instead of evidence.
+  A touch no longer invalidates; a recalibration still does.
+- Era profiles are scored on **their own window** (`era_window()`, extracted from
+  `calibrate` so the definition has one home) — validating a 3y fit against 12y of
+  history would manufacture a failure the model is not responsible for.
+- `<EvidencePanel>` + `<DensityChart>`: headline tally, log-density comparison with a
+  hover readout, then per-family tables where each row shows the real value as a tick on
+  its simulated band, so inside/outside is visual rather than a word to be trusted.
+
+**Results (200 sims, seed 101).** eurusd **11/13**, xauusd 10/16, btcusd **7/16**,
+btcusd_last3y 9/16, btcusd_last4y 10/16. The grouping is what makes this readable:
+eurusd is returns 3/3, clustering 4/4, extremes 1/1, regimes 1/1 — the core model is
+sound and both failures are candle-internal. btcusd full-history misses `vol` and `kurt`
+exactly as the era study predicts, and era-weighting recovers two of those (7 -> 9/16
+at 3y, 10/16 at 4y). Note the era variants still miss `vol` against their own window;
+that is a *different* quantity from the era notebook's gate (realized vs fitted daily
+vol on held-out data) and is not a contradiction of it, but it deserves its own look.
+
+**New finding — `body_ratio` misses for all four assets, and two causes are responsible.**
+The simulator opens every bar exactly at the previous close (`simulate_ticks`:
+`"open": prev_close`), so it never gaps and its body fills ~52% of the range for every
+asset. That is the known intrabar-microstructure gap. But the source data has its own
+pathologies the scrubber cannot see, *because the scrubber works on close-to-close
+returns and never examines intrabar structure*:
+
+| asset | zero-range bars | median gap/range | real body share | sim body share |
+|---|---|---|---|---|
+| btcusd | 0 / 4,388 | 0.006 | 0.483 | 0.519 |
+| xauusd | **751 / 6,096** | 0.176 | 0.506 | 0.515 |
+| eurusd | 14 / 5,788 | 0.305 | **0.020** | 0.523 |
+
+751 gold bars have `high == low`. EUR/USD's median body is 2% of its range, with a third
+of the daily range falling between the previous close and the open — Yahoo's daily FX
+open and close are not a coherent pair. Closes, volatility and regimes are unaffected
+(they are what the model is fitted on), and the `candles` family blurb now says all of
+this in the UI so a reader does not conclude the simulator is broken. **Parked with a
+trigger:** an intrabar gap model is only worth building on a source whose intrabar data
+is trustworthy; the prerequisite is a bar-level scrub gate, not a model change.
+
+**2. The regime heatmap is on for every run.** It was the Phase 4 gate's "visual proof
+the HMM works" and it rendered only while a live WebSocket session streamed —
+`Chart.tsx` passed the overlay as `live ? ... : undefined`, `/simulate` did not return
+states at all, and `promoteLive()` nulled `live`, so the heatmap vanished the instant a
+live session finished.
+
+- `simulate_ticks` now **returns** the latent paths as a third tuple element instead of
+  having `simulate(debug=True)` re-derive them from a second `default_rng(seed)`. That
+  agreed only because `scenario_states` + `conditional_returns` happen to be the first
+  two draws inside it; any reordering would have handed the chart a regime path from a
+  different realization — plausible-looking and wrong. A test now asserts the latent
+  returns reconstruct the bar closes to 1e-12, which is exact (the intra-candle bridge
+  conserves each candle's return), so a desync fails loudly.
+- `aggregate_states()` buckets the regime path onto the same grid as `aggregate_bars`,
+  modal state per coarse bar, ties to calm. A heatmap one bar out would mis-colour the
+  whole series.
+- `/simulate` returns `states` + `n_states`; the store carries them; `promoteLive` hands
+  them over with the bars (trimming a half-formed candle).
+- **Colour was not a free choice.** The pale wash alone separates calm from turbulent by
+  ΔE 3.6 under protanopia — unreadable for the people who most need a non-price cue. Ran
+  the palette validator rather than eyeballing it: the fix is a solid-ink **ribbon**
+  along the top of the price pane as the primary encoding (ΔE 26.7 protan / 35.2 normal,
+  all six checks pass in both themes) with the wash as reinforcement and the legend
+  naming both states in words. Wash and ribbon are now derived from one hue array, so
+  they cannot drift apart. The 3-state palette passes too but no shipped profile has 3
+  states; it needs its own pass when the gold crash component is built.
+
+**Defects found and fixed while building this**
+- `bars.attrs` was the first vehicle for the latent paths: numpy arrays there break
+  pandas' `__finalize__` (it compares `attrs` for equality), so `aggregate_bars` raised
+  `ValueError: truth value of an array...`. Hence the explicit tuple.
+- The evidence panel's poll loop derived `refresh` from `nonce > 0`, which was sticky:
+  one click of *recompute* would have forced a 30 s recompute on every later market
+  switch and, worse, restarted the job on every poll so it never finished. One-shot ref.
+- `json.dumps` emits bare `NaN`/`Infinity`, which `JSON.parse` rejects — one
+  unmeasurable metric would have white-screened the panel. Non-finite metrics are now
+  skipped in the report and the cache is written `allow_nan=False`, so a regression fails
+  loudly in the job rather than silently in the browser. Tested.
+- The density y-axis folded the log floor into its own peak test, so an all-empty band
+  would set `yMax = -Infinity` and blank the canvas.
+- The heatmap was painted *after* the gridlines and tinted them; it is now drawn
+  directly on the background fill, and columns cover the full bar span so same-regime
+  neighbours form one block instead of a picket fence.
+- `↻ new seed` is hidden in evidence mode: the suite has its own fixed seed, and a
+  control that does nothing is worse than no control.
+
+**Validation**: 138 pytest (+21) / 71 vitest (+22); tsc + production build clean. Verified
+against a live uvicorn: `/simulate` state alignment across 3 assets x 2 resolutions x
+2 presets, all five validation reports strict-JSON-parseable by node, cache hit/miss
+behaviour, and the whole bundle served single-port.
+
+**Not done from the review (deliberately, still open)**
+- **One shell, two modes.** `WorkflowPanel` gained a `market` scope so evidence mode
+  reuses the asset picker instead of duplicating it, but distribution mode still has no
+  workflow panel at all and still puts `paths`/`candles` as bare inputs in the toolbar.
+  The status line still lives in the wrapping toolbar, so the chrome jumps.
+- **Distribution view finish.** No band legend, x axis still raw bar offsets rather than
+  years, all stats hidden while building, no drawdown distribution or expected shortfall,
+  no ensemble export. `terminalStats`/`percentileBand` still recompute over every path on
+  every rAF frame.
+- `api/app.py` reports version `0.2.0` while `export.ENGINE_VERSION` is `0.3.0`; the
+  toolbar's "engine 0.2.0" is really the API version.
+- `/workflow` still returns `sorted(RESOLUTIONS)`, so the control reads
+  `daily | monthly | weekly` — alphabetical, not coarsening order.

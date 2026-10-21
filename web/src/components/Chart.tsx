@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef } from "react";
 import { layoutCandles, volumeProfile } from "../engine/candles";
-import { drawChart, THEMES } from "../engine/renderer";
+import { drawChart, RegimeOverlay, THEMES } from "../engine/renderer";
 import { followOffset, priceToY, wheelZoomFactor } from "../engine/viewport";
 import { useStore } from "../store";
+import { RegimeLegend } from "./RegimeLegend";
 
 const AXIS_WIDTH = 64;
 const VOLUME_PANE = 90;
@@ -21,7 +22,7 @@ export function Chart() {
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const { bars, viewport, live, theme } = useStore.getState();
+    const { bars, states, viewport, live, theme } = useStore.getState();
     // live mode displays completed bars + the forming candle; static mode the fetched set
     const display =
       live !== null
@@ -79,12 +80,21 @@ export function Chart() {
     const profile = volumeProfile(layout.visible)
       .map((b) => ({ ...b, y: priceToY(Math.exp(b.center), layout.minPrice, layout.maxPrice, priceHeight) }))
       .filter((b) => b.y >= 0 && b.y <= priceHeight);
+    // the regime heatmap is drawn for EVERY run, not just live ones: /simulate now
+    // returns the latent state path, so the HMM's work is visible in static mode and
+    // survives the end of a live session (promoteLive carries the states over)
+    const overlay: RegimeOverlay | undefined =
+      live !== null
+        ? { states: live.states, formingIndex: live.forming ? display.length - 1 : null }
+        : states.length > 0
+          ? { states, formingIndex: null }
+          : undefined;
     drawChart(
       ctx,
       layout,
       { width: cssW, height: cssH, priceHeight, axisWidth: AXIS_WIDTH },
       THEMES[theme],
-      live ? { states: live.states, formingIndex: live.forming ? display.length - 1 : null } : undefined,
+      overlay,
       profile,
       crossInfo,
       marker && marker.index < display.length ? marker : undefined,
@@ -203,6 +213,7 @@ export function Chart() {
         }}
         onDoubleClick={() => useStore.getState().resetView()}
       />
+      <RegimeLegend />
       {bench && <div ref={fpsRef} className="fps" />}
     </div>
   );

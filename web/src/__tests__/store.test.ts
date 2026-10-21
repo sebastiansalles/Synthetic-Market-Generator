@@ -83,3 +83,61 @@ describe("store hardening", () => {
     useStore.getState().stopLive();
   });
 });
+
+describe("regime path in the store", () => {
+  beforeEach(() => {
+    useStore.setState({ asset: "eurusd", bars: [], states: [], live: null });
+  });
+
+  it("carries the regime path alongside the bars it belongs to", () => {
+    useStore.getState().setBars([candle, candle, candle], "eurusd", [0, 1, 1]);
+    expect(useStore.getState().states).toEqual([0, 1, 1]);
+  });
+
+  it("drops a stale run's states with its bars", () => {
+    useStore.getState().setAsset("xauusd");
+    useStore.getState().setBars([candle], "eurusd", [1]); // late eurusd response
+    expect(useStore.getState().states).toEqual([]);
+  });
+
+  it("clears states on asset switch so the old market's regimes never colour the new one", () => {
+    useStore.getState().setBars([candle, candle], "eurusd", [0, 1]);
+    useStore.getState().setAsset("btcusd");
+    expect(useStore.getState().states).toEqual([]);
+  });
+
+  // The heatmap the user just watched build used to vanish the instant the stream
+  // ended: promoteLive kept `bars` but dropped the session, and the overlay was
+  // live-only. The regime path has to survive the handover.
+  it("promoteLive keeps the finished session's regimes on screen", () => {
+    const s = useStore.getState();
+    s.startLive();
+    for (let i = 0; i < 3; i++) {
+      useStore.getState().applyWsEvent({ type: "bar_open", bar_id: i, open: 1, state: i === 1 ? 1 : 0 });
+      useStore.getState().applyWsEvent({
+        type: "bar_close", bar_id: i, high: 1.1, low: 0.9, close: 1.05, volume: 0,
+        state: i === 1 ? 1 : 0,
+      });
+    }
+    useStore.getState().promoteLive();
+    expect(useStore.getState().live).toBeNull();
+    expect(useStore.getState().bars).toHaveLength(3);
+    expect(useStore.getState().states).toEqual([0, 1, 0]);
+  });
+
+  // A bar_open for the NEXT candle arrives before its bar_close, so states can be
+  // one longer than bars at the moment a session is stopped mid-candle. Trimming
+  // keeps the heatmap indexed in the same space as the promoted bars.
+  it("promoteLive trims a half-formed candle's state", () => {
+    const s = useStore.getState();
+    s.startLive();
+    useStore.getState().applyWsEvent({ type: "bar_open", bar_id: 0, open: 1, state: 0 });
+    useStore.getState().applyWsEvent({
+      type: "bar_close", bar_id: 0, high: 1.1, low: 0.9, close: 1.05, volume: 0, state: 0,
+    });
+    useStore.getState().applyWsEvent({ type: "bar_open", bar_id: 1, open: 1, state: 1 });
+    useStore.getState().promoteLive();
+    expect(useStore.getState().bars).toHaveLength(1);
+    expect(useStore.getState().states).toEqual([0]);
+  });
+});

@@ -295,3 +295,292 @@ button:disabled {
 .ensemble-empty strong {
   color: var(--accent);
 }
+
+/* ---------- regime legend (the heatmap's key + the run's realized mix) ---------- */
+.regime-legend {
+  /* top-right of the plot: top-left carries the OHLC readout and the scenario marker
+     label, and the bottom-left sits on top of the volume pane's bars. The 72px inset
+     clears the price-axis gutter (AXIS_WIDTH). */
+  position: absolute;
+  top: 10px;
+  right: 72px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panelFade, rgba(1, 4, 9, 0.78));
+  backdrop-filter: blur(3px);
+  font-size: 11.5px;
+  color: var(--muted);
+  pointer-events: auto;
+  cursor: help;
+}
+.regime-legend-title {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+  opacity: 0.75;
+}
+.regime-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.regime-chip i {
+  width: 11px;
+  height: 11px;
+  border: 1px solid;
+  border-radius: 3px;
+}
+.regime-chip strong {
+  color: var(--text);
+  font: 600 11.5px ui-monospace, monospace;
+}
+
+/* ---------- evidence panel (the validation suite, on screen) ---------- */
+.evidence {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 18px 22px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.evidence-empty {
+  flex: 1;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 24px;
+  max-width: 560px;
+  margin: 0 auto;
+  text-align: center;
+  color: var(--muted);
+}
+.evidence-empty h2 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text);
+}
+.evidence-empty p {
+  margin: 0;
+  line-height: 1.6;
+}
+.evidence-empty strong {
+  color: var(--text);
+}
+
+.evidence-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.evidence-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.evidence-hero > strong {
+  font: 700 40px/1 ui-monospace, monospace;
+  color: var(--accent);
+  letter-spacing: -0.02em;
+}
+.evidence-hero .of {
+  font-size: 22px;
+  color: var(--muted);
+}
+.evidence-meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+  line-height: 1.6;
+}
+.muted {
+  color: var(--muted);
+}
+
+.evidence-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.evidence-section-head h2 {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.evidence-blurb {
+  margin: 6px 0 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  max-width: 78ch;
+  line-height: 1.6;
+}
+.evidence-blurb strong {
+  color: var(--text);
+}
+.family-tally {
+  font: 600 11.5px ui-monospace, monospace;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+.family-tally.pass {
+  color: var(--bull);
+  border-color: var(--bull);
+}
+.family-tally.check {
+  color: var(--bear);
+  border-color: var(--bear);
+}
+
+.evidence-density {
+  display: flex;
+  flex-direction: column;
+}
+.density-canvas {
+  width: 100%;
+  height: 240px;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  touch-action: none;
+}
+.chart-legend {
+  display: flex;
+  gap: 14px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.chart-legend i {
+  width: 14px;
+  height: 0;
+  border-top: 2px solid var(--text);
+}
+.chart-legend .lg-band i {
+  height: 10px;
+  border: none;
+  background: var(--accent);
+  opacity: 0.28;
+  border-radius: 2px;
+}
+.chart-legend .lg-median i {
+  border-top: 2px dashed var(--accent);
+}
+
+.evidence-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.evidence-table thead th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 0 10px 6px 0;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.evidence-table tbody th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--text);
+  padding: 7px 10px 7px 0;
+}
+.evidence-table td {
+  padding: 7px 10px 7px 0;
+  border-bottom: 1px solid var(--panel-2);
+}
+.evidence-table .num {
+  text-align: right;
+  font: 12px ui-monospace, monospace;
+  white-space: nowrap;
+}
+.evidence-table thead .num {
+  text-align: right;
+}
+.evidence-table .rail-cell {
+  width: 38%;
+  min-width: 140px;
+}
+.rail {
+  position: relative;
+  display: block;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--panel-2);
+}
+.rail i {
+  position: absolute;
+  top: 0;
+}
+.rail-band {
+  height: 14px;
+  background: var(--accent);
+  opacity: 0.3;
+  border-radius: 3px;
+}
+.rail-median {
+  height: 14px;
+  width: 0;
+  border-left: 1px dashed var(--accent);
+}
+.rail-real {
+  height: 14px;
+  width: 0;
+  border-left: 2px solid var(--text);
+  margin-left: -1px;
+}
+.rail-real.out {
+  border-left-color: var(--bear);
+}
+.verdict {
+  font: 600 11px ui-monospace, monospace;
+  white-space: nowrap;
+}
+.verdict.pass {
+  color: var(--bull);
+}
+.verdict.check {
+  color: var(--bear);
+}
+.evidence-table tr.outside th {
+  color: var(--text);
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.link-btn:hover {
+  border-color: transparent;
+  opacity: 0.8;
+}

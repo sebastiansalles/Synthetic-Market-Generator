@@ -86,8 +86,3 @@ export function reduceEvent(s: LiveState, ev: WsEvent): LiveState {
       return s;
   }
 }
-
-/** Regime heatmap colors: calm = cool blue wash, turbulent = hot red wash. */
-export function heatColor(state: number): string {
-  return state >= 1 ? "rgba(248, 81, 73, 0.13)" : "rgba(31, 111, 235, 0.07)";
-}

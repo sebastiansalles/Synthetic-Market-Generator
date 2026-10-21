@@ -50,6 +50,16 @@ export function listProfiles(): Promise<Record<string, ProfileSummary>> {
   return getJson("/profiles");
 }
 
+/** The validation suite for one profile. 200 simulated histories take ~30s, so the
+ *  server caches the report next to the profile and computes it in the background;
+ *  a `computing` status means poll again. */
+export function getValidation(
+  asset: string,
+  refresh = false,
+): Promise<import("./engine/evidence").ValidationState> {
+  return getJson(`/profiles/${asset}/validation${refresh ? "?refresh=true" : ""}`);
+}
+
 export interface ScenarioPreset {
   key: string;
   label: string;
@@ -108,6 +118,8 @@ async function postRun(url: string, run: RunSpec, extra: object = {}): Promise<R
 
 export interface SimulationResult {
   bars: Candle[];
+  states: number[]; // HMM regime per returned bar, same grid as `bars`
+  nStates: number;
   shockAt: number | null; // candle index of an injected shock (flash crash), if any
   preset: string | null;
 }
@@ -115,7 +127,13 @@ export interface SimulationResult {
 export async function simulate(run: RunSpec): Promise<SimulationResult> {
   const resp = await postRun("/simulate", run);
   const body = await resp.json();
-  return { bars: body.bars as Candle[], shockAt: body.shock_at ?? null, preset: body.preset ?? null };
+  return {
+    bars: body.bars as Candle[],
+    states: (body.states as number[]) ?? [],
+    nStates: body.n_states ?? 2,
+    shockAt: body.shock_at ?? null,
+    preset: body.preset ?? null,
+  };
 }
 
 /** Many paths over N candles — the ensemble behind the distribution view. */

@@ -168,11 +168,23 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
                    scenario: Scenario | None = None, ticks_per_candle: int = 24,
                    start_price: float = 100.0, end_date: str | None = None,
                    start_date: str | None = None, drift_annual: float | None = None,
-                   return_ticks: bool = True) -> tuple[pd.DataFrame, pd.DataFrame | None]:
-    """Simulate a full path. Returns (bars, ticks): bars is a validated OHLCV frame
-    (one row per candle); ticks — None unless return_ticks — carries the intra-candle
-    tick stream (bar_id, tick_in_bar, price) for Phase 4's animation. Mass-simulation
-    callers (validation_suite) pass return_ticks=False for ~10x speed."""
+                   return_ticks: bool = True,
+                   ) -> tuple[pd.DataFrame, pd.DataFrame | None, dict]:
+    """Simulate a full path. Returns (bars, ticks, latent):
+
+    - bars: a validated OHLCV frame, one row per candle;
+    - ticks: the intra-candle tick stream (bar_id, tick_in_bar, price, state) for
+      Phase 4's animation — None unless return_ticks. Mass-simulation callers
+      (validation_suite) pass return_ticks=False for ~10x speed;
+    - latent: the state/return/conditional-variance paths that PRODUCED these bars.
+
+    The latent paths are returned rather than re-derivable, deliberately. They used to
+    be recovered by re-running scenario_states + conditional_returns against a second
+    default_rng(seed), which agreed only because those happen to be the first two draws
+    here — any reordering inside this function would have desynced the regime heatmap
+    from the candles it colors, silently. It also stops validation_suite from simulating
+    the return path twice per sim, though the bar loop dominates and the measured
+    difference is within noise."""
     rng = np.random.default_rng(seed)
     states = scenario_states(profile, n_candles, scenario, rng)
     jumps = scenario.jump_path(n_candles) if scenario else None
@@ -218,8 +230,9 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
         prev_close = float(path[-1])
 
     bars = validate_ohlcv(pd.DataFrame(bar_rows)[OHLCV_COLUMNS])
+    latent = {"states": states, "returns": returns, "h": h}
     if not return_ticks:
-        return bars, None
+        return bars, None, latent
     ticks = pd.DataFrame(
         {"bar_id": np.concatenate(tick_ids),
          "tick_in_bar": np.concatenate(tick_idx),
@@ -227,7 +240,7 @@ def simulate_ticks(profile: AssetProfile, n_candles: int, seed: int = 0,
     )
     if tick_ids:
         ticks["state"] = states[np.concatenate(tick_ids)]
-    return bars, ticks
+    return bars, ticks, latent
 
 
 def simulate(profile: AssetProfile, n_candles: int, scenario: Scenario | None = None,
@@ -236,18 +249,11 @@ def simulate(profile: AssetProfile, n_candles: int, scenario: Scenario | None = 
              drift_annual: float | None = None, debug: bool = False):
     """simulate(profile, n_candles, scenario?) -> OHLCV[] (validated). Seeded and
     reproducible; pass debug=True to also get the latent state/return/vol paths."""
-    bars, _ = simulate_ticks(profile, n_candles, seed=seed, scenario=scenario,
-                             ticks_per_candle=ticks_per_candle, start_price=start_price,
-                             end_date=end_date, start_date=start_date,
-                             drift_annual=drift_annual, return_ticks=False)
-    if not debug:
-        return bars
-    rng = np.random.default_rng(seed)
-    states = scenario_states(profile, n_candles, scenario, rng)
-    jumps = scenario.jump_path(n_candles) if scenario else None
-    returns, h = conditional_returns(profile, states, rng, jumps=jumps,
-                                     mu_states=_drift_override(profile, drift_annual))
-    return bars, {"states": states, "returns": returns, "h": h}
+    bars, _, latent = simulate_ticks(profile, n_candles, seed=seed, scenario=scenario,
+                                     ticks_per_candle=ticks_per_candle, start_price=start_price,
+                                     end_date=end_date, start_date=start_date,
+                                     drift_annual=drift_annual, return_ticks=False)
+    return (bars, latent) if debug else bars
 
 
 # ---------------------------------------------------------------------------
@@ -269,12 +275,29 @@ def _ohlc_shape_metrics(bars: pd.DataFrame) -> dict:
     }
 
 
-def _real_metrics(profile: AssetProfile, df_real: pd.DataFrame) -> dict:
+def real_returns(profile: AssetProfile, df_real: pd.DataFrame) -> pd.Series:
+    """The asset's clean log returns, scrubbed exactly as calibration scrubbed them.
+
+    Shared by the metric comparison and the return-density band so the evidence the
+    UI shows is measured against the same series the parameters were fitted on.
+
+    The registry is keyed by BASE asset: an era variant's stem (`btcusd_last3y`) is not
+    in it, so looking it up directly would silently fall back to the default scrub
+    threshold and judge the era profile against differently-scrubbed returns than it
+    was calibrated on. Harmless while every asset keeps the default, which is exactly
+    what makes it worth stripping the suffix now rather than when it starts lying."""
+    import re
+
     from synthetic.registry import REGISTRY as REG
 
-    spec = REG.get(profile.asset)
+    spec = REG.get(re.sub(r"_last[\d.]+y$", "", profile.asset))
     max_gap = spec.scrub_max_gap_days if spec else 6.0
     r, _ = scrub_returns(log_returns(df_real), max_gap_days=max_gap)
+    return r
+
+
+def _real_metrics(profile: AssetProfile, df_real: pd.DataFrame) -> dict:
+    r = real_returns(profile, df_real)
     out = {
         "mean": r.mean(), "vol": r.std(), "kurt": r.kurt(),
         "max_abs": r.abs().max(),
@@ -306,26 +329,156 @@ def _sim_metrics(bars: pd.DataFrame, states: np.ndarray | None = None) -> dict:
     return out
 
 
+# Display metadata for the validation report: label, family, and the units the
+# frontend should format a value in. The engine owns this rather than the UI because
+# the metric set is the engine's contract — a metric added to _real_metrics without a
+# label here would show up unexplained.
+METRIC_META: dict[str, tuple[str, str, str]] = {
+    "mean": ("Mean return per bar", "returns", "ret"),
+    "vol": ("Volatility per bar", "returns", "ret"),
+    "kurt": ("Excess kurtosis (fat tails)", "returns", "num"),
+    "r2_acf_1": ("Squared-return ACF, lag 1", "clustering", "num"),
+    "r2_acf_2": ("Squared-return ACF, lag 2", "clustering", "num"),
+    "r2_acf_5": ("Squared-return ACF, lag 5", "clustering", "num"),
+    "r2_acf_10": ("Squared-return ACF, lag 10", "clustering", "num"),
+    "max_abs": ("Largest single-bar move", "extremes", "pct"),
+    "turb_share": ("Share of bars in the turbulent regime", "regimes", "pct"),
+    "range_mean": ("Mean high-low range", "candles", "pct"),
+    "body_ratio": ("Body as a share of range", "candles", "pct"),
+    "close_loc": ("Close position inside the range", "candles", "pct"),
+    "up_bar_share": ("Share of up bars", "candles", "pct"),
+    "volu_mean": ("Mean volume", "volume", "num"),
+    "volu_corr_absr": ("Volume vs |return| correlation", "volume", "num"),
+    "volu_acf1": ("Volume persistence (ACF lag 1)", "volume", "num"),
+}
+
+# Families, in reading order, each with the question it answers. Grouping matters:
+# a flat table of 13 rows with 5 CHECKs reads as "the model half works", when in
+# fact the failures concentrate in one family with a known structural cause.
+METRIC_FAMILIES: list[tuple[str, str, str]] = [
+    ("returns", "Return distribution",
+     "Does a simulated path have the same average move, spread and tail weight as the "
+     "real asset?"),
+    ("clustering", "Volatility clustering",
+     "Do big moves cluster the way they do in reality? This is what GARCH is for, and "
+     "the autocorrelation of squared returns is how it is measured."),
+    ("extremes", "Extremes",
+     "Is the worst single bar in a simulated history as bad as the worst real one — "
+     "neither tamer nor absurd?"),
+    ("regimes", "Regime mix",
+     "Does the Markov chain spend the same fraction of its time in the turbulent state "
+     "as the HMM infers from real data?"),
+    ("candles", "Candle internals",
+     "Not just closes: the shape of the bars themselves — how wide, where the close "
+     "sits, how much of the range the body fills. This family is expected to miss, "
+     "for two reasons on record. The simulator opens every bar exactly at the "
+     "previous close, so it never gaps, and its body fills ~52% of the range for "
+     "every asset; and the source OHLC has intrabar pathologies the scrubber cannot "
+     "see, because it works on close-to-close returns — 751 of 6,096 gold bars have "
+     "high equal to low, and EUR/USD's median body is 2% of its range with a third "
+     "of the daily range falling between the previous close and the open. Closes, "
+     "volatility and regimes are unaffected: those are what the model is fitted on."),
+    ("volume", "Volume",
+     "Does modelled volume track absolute returns and persist from bar to bar as real "
+     "volume does?"),
+]
+
+_DENSITY_BINS = 64
+_DENSITY_SPAN_SD = 8.0  # +/- 8 real standard deviations: wide enough to show the tails
+
+
+def validation_report(profile: AssetProfile, df_real: pd.DataFrame,
+                      n_sims: int = 200, seed: int = 101) -> dict:
+    """Phase 2's gate as a JSON-safe report: every metric with the real value, the
+    simulated 5-95% band and a verdict, plus the return-density band.
+
+    This is a *parametric bootstrap*, not a point comparison. The question is never
+    "did the simulation hit the real number" — a single path never will — but "does
+    the real number fall inside the range this model produces". Which makes a CHECK
+    informative rather than embarrassing: it says the real data sits outside what the
+    model can generate, and names where.
+    """
+    real = _real_metrics(profile, df_real)
+    r_real = real_returns(profile, df_real).to_numpy(dtype=float)
+    n = len(df_real) - 1
+
+    # shared density grid, in units of the real series' own volatility, so the real
+    # histogram and every simulated one are binned identically
+    sd = float(np.std(r_real))
+    edges = np.linspace(-_DENSITY_SPAN_SD * sd, _DENSITY_SPAN_SD * sd, _DENSITY_BINS + 1)
+
+    def density(x: np.ndarray) -> np.ndarray:
+        counts, _ = np.histogram(x, bins=edges)
+        return counts / (len(x) * np.diff(edges))
+
+    sims: list[dict] = []
+    sim_density = np.empty((n_sims, _DENSITY_BINS))
+    for i in range(n_sims):
+        bars, latent = simulate(profile, n, seed=seed + i, debug=True)
+        sims.append(_sim_metrics(bars, states=latent["states"]))
+        sim_density[i] = density(latent["returns"])
+
+    metrics = []
+    for family, _label, _blurb in METRIC_FAMILIES:
+        for key, (label, fam, unit) in METRIC_META.items():
+            if fam != family or key not in real:
+                continue
+            col = pd.Series([m.get(key, np.nan) for m in sims]).dropna()
+            target = float(real[key])
+            # A metric that could not be measured is not evidence either way, and a
+            # non-finite value would serialize as literal NaN — invalid JSON that
+            # JSON.parse rejects, white-screening the panel instead of failing loudly.
+            if len(col) == 0 or not np.isfinite(target):
+                continue
+            lo, hi = (float(q) for q in col.quantile([0.05, 0.95]))
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                continue
+            metrics.append({
+                "key": key, "label": label, "family": family, "unit": unit,
+                "real": target, "sim_median": float(col.median()),
+                "lo": lo, "hi": hi, "inside": bool(lo <= target <= hi),
+            })
+
+    families = []
+    for key, label, blurb in METRIC_FAMILIES:
+        rows = [m for m in metrics if m["family"] == key]
+        if not rows:
+            continue
+        families.append({"key": key, "label": label, "blurb": blurb,
+                         "passed": sum(m["inside"] for m in rows), "total": len(rows)})
+
+    q_lo, q_med, q_hi = np.percentile(sim_density, [5, 50, 95], axis=0)
+    return {
+        "asset": profile.asset,
+        "n_bars": int(len(df_real)),
+        "n_sims": int(n_sims),
+        "seed": int(seed),
+        "history_years": getattr(profile, "history_years", None),
+        "last_date": getattr(profile, "last_date", None),
+        "summary": {"passed": sum(m["inside"] for m in metrics), "total": len(metrics)},
+        "families": families,
+        "metrics": metrics,
+        "density": {
+            # bin centres, in return units; the UI plots these on a log density axis
+            "centers": ((edges[:-1] + edges[1:]) / 2).tolist(),
+            "real": density(r_real).tolist(),
+            "lo": q_lo.tolist(), "median": q_med.tolist(), "hi": q_hi.tolist(),
+            "real_sd": sd,
+        },
+    }
+
+
 def validation_suite(profile: AssetProfile, df_real: pd.DataFrame,
                      n_sims: int = 200, seed: int = 101) -> pd.DataFrame:
-    """Phase 2 gate: simulated paths must reproduce the real data's distributional
-    and time-series properties (returns, squared-return ACF, extremes, candle
-    internals, regime mix, volume)."""
-    real = _real_metrics(profile, df_real)
-    n = len(df_real) - 1
-    sims = []
-    for i in range(n_sims):
-        bars, dbg = simulate(profile, n, seed=seed + i, debug=True)
-        sims.append(_sim_metrics(bars, states=dbg["states"]))
-
-    rows = []
-    for metric, target in real.items():
-        s = pd.Series([m.get(metric, np.nan) for m in sims]).dropna()
-        if len(s) == 0:
-            continue
-        lo, hi = s.quantile([0.05, 0.95])
-        inside = bool(lo <= target <= hi)
-        rows.append({"metric": metric, "real": round(target, 5), "sim_median": round(s.median(), 5),
-                     "sim 5-95%": f"[{lo:.5f}, {hi:.5f}]", "inside": inside,
-                     "verdict": "PASS" if inside else "CHECK"})
-    return pd.DataFrame(rows)
+    """Phase 2 gate as a table: simulated paths must reproduce the real data's
+    distributional and time-series properties (returns, squared-return ACF, extremes,
+    candle internals, regime mix, volume). `validation_report` is the same computation
+    with the density band and display metadata attached."""
+    report = validation_report(profile, df_real, n_sims=n_sims, seed=seed)
+    return pd.DataFrame([
+        {"metric": m["key"], "real": round(m["real"], 5),
+         "sim_median": round(m["sim_median"], 5),
+         "sim 5-95%": f"[{m['lo']:.5f}, {m['hi']:.5f}]",
+         "inside": m["inside"], "verdict": "PASS" if m["inside"] else "CHECK"}
+        for m in report["metrics"]
+    ])

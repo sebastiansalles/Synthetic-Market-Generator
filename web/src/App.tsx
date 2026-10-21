@@ -9,6 +9,7 @@ import {
 } from "./api";
 import { Chart } from "./components/Chart";
 import { EnsembleView } from "./components/EnsembleView";
+import { EvidencePanel } from "./components/EvidencePanel";
 import { LiveCounter, LIVE_TOTAL } from "./components/LiveCounter";
 import { WorkflowPanel } from "./components/WorkflowPanel";
 import { WsEvent } from "./engine/live";
@@ -75,8 +76,8 @@ export function App() {
       startPrice: profilesRef.current[asset]?.last_close,
       driftAnnual,
     })
-      .then(({ bars, shockAt, preset: usedPreset }) => {
-        setBars(bars, asset);
+      .then(({ bars, states, shockAt, preset: usedPreset }) => {
+        setBars(bars, asset, states);
         useStore.getState().setRunKey(runKey);
         if (shockAt !== null) {
           // flag the injected shock and bring it on screen — a one-candle event is
@@ -125,14 +126,26 @@ export function App() {
       <header className="toolbar">
         <span className="brand">Synthetic Market Generator</span>
         <div className="seg">
-          <button className={mode === "single" ? "on" : ""} onClick={() => useStore.getState().setMode("single")}>
+          <button
+            className={mode === "single" ? "on" : ""}
+            onClick={() => useStore.getState().setMode("single")}
+            title="one simulated path, candle by candle"
+          >
             single
           </button>
           <button
             className={mode === "ensemble" ? "on" : ""}
             onClick={() => useStore.getState().setMode("ensemble")}
+            title="hundreds of paths: the distribution the model implies"
           >
             distribution
+          </button>
+          <button
+            className={mode === "evidence" ? "on" : ""}
+            onClick={() => useStore.getState().setMode("evidence")}
+            title="the statistical validation suite: does this model reproduce the real asset?"
+          >
+            evidence
           </button>
         </div>
         {mode === "ensemble" && (
@@ -169,9 +182,13 @@ export function App() {
             </label>
           </>
         )}
-        <button onClick={() => useStore.setState({ seed: seed + 1 })} disabled={isLive}>
-          ↻ new seed
-        </button>
+        {/* the evidence view has its own fixed seed: a re-seed would change nothing
+            there, and a control that does nothing is worse than no control */}
+        {mode !== "evidence" && (
+          <button onClick={() => useStore.setState({ seed: seed + 1 })} disabled={isLive}>
+            ↻ new seed
+          </button>
+        )}
         {mode === "single" && <button onClick={resetView}>reset view</button>}
         <button
           onClick={() => useStore.getState().setTheme(theme === "dark" ? "light" : "dark")}
@@ -196,9 +213,18 @@ export function App() {
         </span>
       </header>
       <div className="workspace">
-        {mode === "single" && <WorkflowPanel profiles={profiles} options={options} disabled={isLive} />}
+        {mode !== "ensemble" && (
+          <WorkflowPanel
+            profiles={profiles}
+            options={options}
+            disabled={isLive}
+            scope={mode === "evidence" ? "market" : "full"}
+          />
+        )}
         {mode === "ensemble" ? (
           <EnsembleView summary={summary} />
+        ) : mode === "evidence" ? (
+          <EvidencePanel summary={summary} />
         ) : hasBars || isLive ? (
           <Chart />
         ) : (

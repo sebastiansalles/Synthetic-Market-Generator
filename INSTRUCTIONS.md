@@ -70,13 +70,24 @@ cd web && npm run build && cd ..                 # (re)build the frontend bundle
 
 **Dev mode (hot reload):** terminal 1: `uvicorn app:app --app-dir api --port 8000`; terminal 2: `cd web && npm run dev` → http://localhost:5173 (proxies API + WS).
 
-> **Runbook rule:** before (re)starting the server, `pkill -f "uvicorn app:app"` — a stale server on port 8000 serves old code silently. The toolbar shows the engine version (`engine 0.2.0`); if it looks wrong, hard-refresh (Ctrl+Shift+R) — HTML is served `no-store`.
+> **Runbook rule:** before (re)starting the server, `pkill -f "uvicorn app:app"` — a stale server on port 8000 serves old code silently. Run it on its own: `pkill -f "uvicorn app:app" && uvicorn app:app ...` matches *its own* command line through `-f` and kills the shell issuing it. The toolbar shows the engine version (`engine 0.2.0`); if it looks wrong, hard-refresh (Ctrl+Shift+R) — HTML is served `no-store`.
 
 ### Using the app
 
-- **Toolbar:** asset picker, `↻ new seed` (re-simulates, keeps your zoom), `reset view`, `▶ live`.
+- **Toolbar:** mode switch (`single | distribution | evidence`), asset picker, `↻ new seed` (re-simulates, keeps your zoom), `reset view`, `▶ live`.
+- **Evidence mode:** the validation suite on screen — a headline tally ("11/13 statistics
+  reproduced"), the real return density against the band of densities 200 simulated
+  histories produce, then every statistic grouped by family with its real value, the
+  model's 5–95% band, and where the real value falls on that band. The first request for
+  an uncached profile computes in the background (~30 s) and the report is then cached
+  next to the profile, keyed on a hash of the pickle — so a recalibration invalidates it
+  and a clone does not.
 - **Live mode:** streams a 400-candle session tick-by-tick over WebSocket — watch each candle form, with the regime heatmap (blue = calm, red = turbulent) behind the price pane. The view auto-follows the tail until you pan.
 - **Chart:** wheel = zoom at cursor · drag = pan · double-click / `R` = reset · `←`/`→` pan · `+`/`−` zoom. Crosshair shows price tag + hovered OHLC; the right strip is the volume-at-price profile.
+- **Regime heatmap:** behind every run, not just live ones — a solid ribbon along the top
+  of the price pane plus a background wash, coloured by the HMM state that generated each
+  bar, with a legend giving the run's realized regime mix. `/simulate` returns the latent
+  state path, so the regimes you see are the ones that made the candles.
 - **Workflow (Phase 5):** pick profile → resolution/duration → scenario preset → export **LEAN / CSV / Parquet**. Runs are seeded and anchored to the asset's last real close.
 - **Benchmark:** append `?bench=1` for a scripted pan/zoom loop with an fps readout (the 60 fps / 1,000+ candle gate).
 
@@ -87,6 +98,8 @@ cd web && npm run build && cd ..                 # (re)build the frontend bundle
 | `GET /health` | status + engine version + registered assets |
 | `GET /profiles` | all profiles (incl. era artifacts like `btcusd_last3y`) |
 | `GET /profiles/{asset}` | full parameter summary (state vols, dwells, drift ± SE, scrub audit) |
+| `GET /profiles/{asset}/validation` | the validation suite: every statistic vs the simulated 5–95% band, plus the return-density band. Cached per profile (`?refresh=true` recomputes) |
+| `GET /validation/families` | the metric families and the question each answers |
 | `POST /simulate` | seeded OHLCV JSON (`n_candles` ≤ 10k, optional `start_price`, `drift_annual`, scenario) |
 | `POST /profiles/{asset}/recalibrate?max_history_years=N` | re-fit empirically; windowed fits save as `{asset}_last{N}y.pkl` |
 | `POST /export` | LEAN / CSV / Parquet download of a run spec |
@@ -98,8 +111,8 @@ Set `SMG_CORS_ORIGINS` to override the default `*` CORS policy.
 ## 5. Tests
 
 ```bash
-cd engine && pytest -q        # 113 tests: engine math, estimators, API, WS
-cd web && npm test            # 44 vitest: viewport/layout/live-reducer/store logic
+cd engine && pytest -q        # 138 tests: engine math, estimators, API, WS, validation
+cd web && npm test            # 71 vitest: viewport/layout/live-reducer/store/evidence
 npm run build                 # tsc typecheck + production bundle
 ```
 
